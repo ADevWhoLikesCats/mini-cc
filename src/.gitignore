@@ -1,0 +1,8 @@
+bin/*.dll
+bin/*.exe
+bin/mini-cc.exe
+bin/rung1.exe
+bin/rung1_test.exe
+bin/probe.exe
+src/*.o
+*.o

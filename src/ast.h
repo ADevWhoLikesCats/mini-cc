@@ -1,0 +1,101 @@
+#pragma once
+#include <stddef.h>
+
+typedef enum {
+    EXPR_INT_LIT,
+    EXPR_VAR,
+    EXPR_BINOP,
+    EXPR_UNOP,
+    EXPR_CALL
+} ExprKind;
+
+typedef enum {
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+    OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE,
+    OP_AND, OP_OR,
+    OP_ASSIGN
+} BinOpKind;
+
+typedef enum {
+    UNOP_NEG,
+    UNOP_NOT
+} UnOpKind;
+
+typedef struct Expr Expr;
+struct Expr {
+    ExprKind kind;
+    union {
+        long int_lit;
+        char *var_name;
+        struct { BinOpKind op; Expr *lhs, *rhs; } binop;
+        struct { UnOpKind op; Expr *operand; } unop;
+        struct { char *name; Expr **args; int nargs; } call;
+    };
+};
+
+typedef enum {
+    STMT_RETURN,
+    STMT_EXPR,
+    STMT_DECL,
+    STMT_BLOCK,
+    STMT_IF,
+    STMT_WHILE
+} StmtKind;
+
+typedef struct Stmt Stmt;
+struct Stmt {
+    StmtKind kind;
+    Stmt *next;
+    union {
+        Expr *ret_expr;
+        Expr *expr;
+        struct { char *name; Expr *init; } decl;
+        Stmt *block;
+        struct { Expr *cond; Stmt *then_body; Stmt *else_body; } if_stmt;
+        struct { Expr *cond; Stmt *body; } while_stmt;
+    };
+};
+
+typedef struct {
+    char *name;
+} Param;
+
+typedef struct Func Func;
+struct Func {
+    char  *name;
+    int    num_params;
+    Param *params;
+    Stmt  *body;
+    Func  *next;
+};
+
+typedef struct {
+    Func *funcs;
+} Program;
+
+Program *program_new(void);
+void     program_free(Program *p);
+Func    *func_new(const char *name);
+void     func_add_param(Func *f, const char *name);
+void     func_set_body(Func *f, Stmt *body);
+void     program_add_func(Program *p, Func *f);
+
+Expr *expr_int(long v);
+Expr *expr_var(const char *name);
+Expr *expr_binop(BinOpKind op, Expr *l, Expr *r);
+Expr *expr_unop(UnOpKind op, Expr *operand);
+Expr *expr_call(const char *name, Expr **args, int nargs);
+void  expr_free(Expr *e);
+
+Stmt *stmt_return(Expr *e);
+Stmt *stmt_expr(Expr *e);
+Stmt *stmt_decl(const char *name, Expr *init);
+Stmt *stmt_block(Stmt *body);
+Stmt *stmt_if(Expr *cond, Stmt *then_body, Stmt *else_body);
+Stmt *stmt_while(Expr *cond, Stmt *body);
+void  stmt_list_append(Stmt **head, Stmt *s);
+void  stmt_free(Stmt *s);
+
+void program_print(const Program *p);
+void expr_print(const Expr *e, int indent);
+void stmt_print(const Stmt *s, int indent);
