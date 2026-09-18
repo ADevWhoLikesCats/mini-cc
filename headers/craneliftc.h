@@ -95,6 +95,8 @@ typedef int64_t CImm64;
 
 typedef uint32_t CJumpTable;
 
+typedef uint32_t CFuncRef;
+
 void cstr_free(char *s);
 
 FunctionBuilderContext *CL_FunctionBuilderContext_new(void);
@@ -360,14 +362,6 @@ CValue CL_FunctionBuilder_ineg(FunctionBuilder *builder, CValue one);
 
 CValue CL_FunctionBuilder_iabs(FunctionBuilder *builder, CValue one);
 
-CValue CL_FunctionBuilder_ineg(FunctionBuilder *builder, CValue one);
-
-CValue CL_FunctionBuilder_iabs(FunctionBuilder *builder, CValue one);
-
-CValue CL_FunctionBuilder_vany_true(FunctionBuilder *builder, CValue one);
-
-CValue CL_FunctionBuilder_vall_true(FunctionBuilder *builder, CValue one);
-
 CValue CL_FunctionBuilder_bnot(FunctionBuilder *builder, CValue one);
 
 CValue CL_FunctionBuilder_bitrev(FunctionBuilder *builder, CValue one);
@@ -430,3 +424,17 @@ uint32_t CL_ObjectModule_declare_function(ObjectModule *module, const char *name
 void CL_ObjectModule_define_function(ObjectModule *module, uint32_t func_id, Function *func);
 
 int32_t CL_ObjectModule_finish_and_emit(ObjectModule *module, const char *path);
+
+CFuncRef CL_ObjectModule_declare_func_in_func(ObjectModule *module,
+                                              uint32_t func_id,
+                                              FunctionBuilder *builder);
+
+CInst CL_FunctionBuilder_call(FunctionBuilder *builder,
+                              CFuncRef func_ref,
+                              CValue *args,
+                              size_t nargs);
+
+size_t CL_FunctionBuilder_inst_results(FunctionBuilder *builder,
+                                       CInst inst,
+                                       CValue *out,
+                                       size_t out_capacity);

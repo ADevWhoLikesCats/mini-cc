@@ -37,14 +37,15 @@ static int map_binop(enum CXBinaryOperatorKind k, BinOpKind *out) {
     }
 }
 
+/* ─────────────  Expression lowering  ───────────── */
+
 static Expr *lower_expr(CXCursor c);
 
 static Expr *lower_binop(CXCursor c) {
     enum CXBinaryOperatorKind bk = clang_getCursorBinaryOperatorKind(c);
     BinOpKind op;
-    if (!map_binop(bk, &op)) {
-        return NULL;
-    }
+    if (!map_binop(bk, &op)) return NULL;
+
     CXCursor kids[2];
     int idx = 0;
     enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
@@ -91,7 +92,6 @@ static Expr *lower_int_literal(CXCursor c) {
         clang_EvalResult_dispose(ev);
         return expr_int((long)v);
     }
-    /* Fallback: parse the spelling. */
     CXString sp = clang_getCursorSpelling(c);
     long v = strtol(clang_getCString(sp), NULL, 0);
     clang_disposeString(sp);
@@ -136,12 +136,8 @@ static Expr *lower_expr(CXCursor c) {
         case CXCursor_BinaryOperator: return lower_binop(c);
         case CXCursor_UnaryOperator:  return lower_unop(c);
         case CXCursor_CallExpr:       return lower_call(c);
+        case CXCursor_UnexposedExpr:
         case CXCursor_ParenExpr: {
-            ExprCtx ctx = {0};
-            clang_visitChildren(c, expr_visitor, &ctx);
-            return ctx.result;
-        }
-        case CXCursor_UnexposedExpr: {
             ExprCtx ctx = {0};
             clang_visitChildren(c, expr_visitor, &ctx);
             return ctx.result;
@@ -157,6 +153,8 @@ static Expr *lower_expr(CXCursor c) {
         }
     }
 }
+
+/* ─────────────  Statement lowering  ───────────── */
 
 typedef struct { Stmt *head, *tail; } StmtList;
 
@@ -209,7 +207,7 @@ static Stmt *lower_if(CXCursor c) {
 
     Expr *cond = NULL;
     Stmt *then_body = NULL, *else_body = NULL;
-    if (idx >= 1) { ExprCtx ectx = {0}; clang_visitChildren(kids[0], expr_visitor, &ectx); cond = ectx.result; }
+    if (idx >= 1) cond = lower_expr(kids[0]);
     if (idx >= 2) then_body = lower_stmt(kids[1]);
     if (idx >= 3) else_body = lower_stmt(kids[2]);
     return stmt_if(cond, then_body, else_body);
@@ -227,7 +225,7 @@ static Stmt *lower_while(CXCursor c) {
 
     Expr *cond = NULL;
     Stmt *body = NULL;
-    if (idx >= 1) { ExprCtx ectx = {0}; clang_visitChildren(kids[0], expr_visitor, &ectx); cond = ectx.result; }
+    if (idx >= 1) cond = lower_expr(kids[0]);
     if (idx >= 2) body = lower_stmt(kids[1]);
     return stmt_while(cond, body);
 }
@@ -265,6 +263,8 @@ static Stmt *lower_stmt(CXCursor c) {
         }
     }
 }
+
+/* ─────────────  Top-level  ───────────── */
 
 typedef struct { Program *prog; } TopCtx;
 
