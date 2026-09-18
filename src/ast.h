@@ -6,6 +6,7 @@
 
 typedef enum {
     EXPR_INT_LIT,
+    EXPR_STRING_LIT,
     EXPR_VAR,
     EXPR_BINOP,
     EXPR_UNOP,
@@ -34,6 +35,7 @@ struct Expr {
     CXType   type;
     union {
         long int_lit;
+        char *string_lit;
         char *var_name;
         struct { BinOpKind op; Expr *lhs, *rhs; } binop;
         struct { UnOpKind op; Expr *operand; } unop;
@@ -52,7 +54,11 @@ typedef enum {
     STMT_DECL,
     STMT_BLOCK,
     STMT_IF,
-    STMT_WHILE
+    STMT_WHILE,
+    STMT_FOR,
+    STMT_DO,
+    STMT_BREAK,
+    STMT_CONTINUE
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -66,6 +72,8 @@ struct Stmt {
         Stmt *block;
         struct { Expr *cond; Stmt *then_body; Stmt *else_body; } if_stmt;
         struct { Expr *cond; Stmt *body; } while_stmt;
+        struct { Stmt *init; Expr *cond; Expr *post; Stmt *body; } for_stmt;
+        struct { Expr *cond; Stmt *body; } do_stmt;
     };
 };
 
@@ -98,6 +106,7 @@ void     func_set_body(Func *f, Stmt *body);
 void     program_add_func(Program *p, Func *f);
 
 Expr *expr_int(long v);
+Expr *expr_string(const char *s);
 Expr *expr_var(const char *name);
 Expr *expr_binop(BinOpKind op, Expr *l, Expr *r);
 Expr *expr_unop(UnOpKind op, Expr *operand);
@@ -114,6 +123,10 @@ Stmt *stmt_decl(const char *name, Expr *init);
 Stmt *stmt_block(Stmt *body);
 Stmt *stmt_if(Expr *cond, Stmt *then_body, Stmt *else_body);
 Stmt *stmt_while(Expr *cond, Stmt *body);
+Stmt *stmt_for(Stmt *init, Expr *cond, Expr *post, Stmt *body);
+Stmt *stmt_do(Stmt *body, Expr *cond);
+Stmt *stmt_break(void);
+Stmt *stmt_continue(void);
 void  stmt_list_append(Stmt **head, Stmt *s);
 void  stmt_free(Stmt *s);
 

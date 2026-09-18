@@ -1,13 +1,11 @@
 #include "sema.h"
 #include <stdio.h>
 
-/* Rung 0: libclang did the semantic analysis. This only sanity-checks
-   the AST we built for structural invariants codegen relies on. */
-
 static int verify_expr(const Expr *e) {
     if (!e) return 0;
     switch (e->kind) {
         case EXPR_INT_LIT: return 1;
+        case EXPR_STRING_LIT: return e->string_lit != NULL;
         case EXPR_VAR:     return e->var_name != NULL;
         case EXPR_BINOP:   return verify_expr(e->binop.lhs) && verify_expr(e->binop.rhs);
         case EXPR_UNOP:    return verify_expr(e->unop.operand);
@@ -41,6 +39,19 @@ static int verify_stmt(const Stmt *s) {
             case STMT_WHILE:
                 if (!verify_expr(s->while_stmt.cond)) return 0;
                 if (!verify_stmt(s->while_stmt.body)) return 0;
+                break;
+            case STMT_FOR:
+                if (s->for_stmt.init && !verify_stmt(s->for_stmt.init)) return 0;
+                if (s->for_stmt.cond && !verify_expr(s->for_stmt.cond)) return 0;
+                if (s->for_stmt.post && !verify_expr(s->for_stmt.post)) return 0;
+                if (!verify_stmt(s->for_stmt.body)) return 0;
+                break;
+            case STMT_DO:
+                if (!verify_stmt(s->do_stmt.body)) return 0;
+                if (!verify_expr(s->do_stmt.cond)) return 0;
+                break;
+            case STMT_BREAK:
+            case STMT_CONTINUE:
                 break;
         }
     }

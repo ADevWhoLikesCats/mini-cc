@@ -10,8 +10,6 @@ static char *dup_str(const char *s) {
     return r;
 }
 
-/* ─────────────  Program / Func  ───────────── */
-
 Program *program_new(void) { return calloc(1, sizeof(Program)); }
 
 Func *func_new(const char *name) {
@@ -51,12 +49,17 @@ void program_free(Program *p) {
     free(p);
 }
 
-/* ─────────────  Expr  ───────────── */
-
 Expr *expr_int(long v) {
     Expr *e = calloc(1, sizeof(Expr));
     e->kind = EXPR_INT_LIT;
     e->int_lit = v;
+    return e;
+}
+
+Expr *expr_string(const char *s) {
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = EXPR_STRING_LIT;
+    e->string_lit = dup_str(s);
     return e;
 }
 
@@ -125,6 +128,7 @@ void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
         case EXPR_VAR: free(e->var_name); break;
+        case EXPR_STRING_LIT: free(e->string_lit); break;
         case EXPR_BINOP: expr_free(e->binop.lhs); expr_free(e->binop.rhs); break;
         case EXPR_UNOP:  expr_free(e->unop.operand); break;
         case EXPR_CALL:
@@ -148,8 +152,6 @@ void expr_free(Expr *e) {
     }
     free(e);
 }
-
-/* ─────────────  Stmt  ───────────── */
 
 Stmt *stmt_return(Expr *e) {
     Stmt *s = calloc(1, sizeof(Stmt));
@@ -189,6 +191,35 @@ Stmt *stmt_while(Expr *cond, Stmt *body) {
     return s;
 }
 
+Stmt *stmt_for(Stmt *init, Expr *cond, Expr *post, Stmt *body) {
+    Stmt *s = calloc(1, sizeof(Stmt));
+    s->kind = STMT_FOR;
+    s->for_stmt.init = init;
+    s->for_stmt.cond = cond;
+    s->for_stmt.post = post;
+    s->for_stmt.body = body;
+    return s;
+}
+
+Stmt *stmt_do(Stmt *body, Expr *cond) {
+    Stmt *s = calloc(1, sizeof(Stmt));
+    s->kind = STMT_DO;
+    s->do_stmt.cond = cond; s->do_stmt.body = body;
+    return s;
+}
+
+Stmt *stmt_break(void) {
+    Stmt *s = calloc(1, sizeof(Stmt));
+    s->kind = STMT_BREAK;
+    return s;
+}
+
+Stmt *stmt_continue(void) {
+    Stmt *s = calloc(1, sizeof(Stmt));
+    s->kind = STMT_CONTINUE;
+    return s;
+}
+
 void stmt_list_append(Stmt **head, Stmt *s) {
     if (!*head) { *head = s; return; }
     Stmt *cur = *head;
@@ -213,13 +244,24 @@ void stmt_free(Stmt *s) {
                 expr_free(s->while_stmt.cond);
                 stmt_free(s->while_stmt.body);
                 break;
+            case STMT_FOR:
+                stmt_free(s->for_stmt.init);
+                expr_free(s->for_stmt.cond);
+                expr_free(s->for_stmt.post);
+                stmt_free(s->for_stmt.body);
+                break;
+            case STMT_DO:
+                expr_free(s->do_stmt.cond);
+                stmt_free(s->do_stmt.body);
+                break;
+            case STMT_BREAK:
+            case STMT_CONTINUE:
+                break;
         }
         free(s);
         s = n;
     }
 }
-
-/* ─────────────  Printer  ───────────── */
 
 static void indent(int n) { for (int i = 0; i < n; i++) fputs("  ", stdout); }
 
@@ -240,6 +282,7 @@ void expr_print(const Expr *e, int ind) {
     if (!e) { indent(ind); puts("(null expr)"); return; }
     switch (e->kind) {
         case EXPR_INT_LIT: indent(ind); printf("Int(%ld)\n", e->int_lit); break;
+        case EXPR_STRING_LIT: indent(ind); printf("Str(%s)\n", e->string_lit); break;
         case EXPR_VAR:     indent(ind); printf("Var(%s)\n", e->var_name); break;
         case EXPR_BINOP:
             indent(ind); printf("BinOp(%s)\n", binop_str(e->binop.op));
@@ -312,6 +355,25 @@ void stmt_print(const Stmt *s, int ind) {
                 indent(ind); puts("body:");
                 stmt_print(s->while_stmt.body, ind + 1);
                 break;
+            case STMT_FOR:
+                indent(ind); puts("For");
+                indent(ind + 1); puts("init:");
+                stmt_print(s->for_stmt.init, ind + 2);
+                indent(ind + 1); puts("cond:");
+                expr_print(s->for_stmt.cond, ind + 2);
+                indent(ind + 1); puts("post:");
+                expr_print(s->for_stmt.post, ind + 2);
+                indent(ind + 1); puts("body:");
+                stmt_print(s->for_stmt.body, ind + 2);
+                break;
+            case STMT_DO:
+                indent(ind); puts("Do");
+                stmt_print(s->do_stmt.body, ind + 1);
+                indent(ind); puts("while");
+                expr_print(s->do_stmt.cond, ind + 1);
+                break;
+            case STMT_BREAK:    indent(ind); puts("Break"); break;
+            case STMT_CONTINUE: indent(ind); puts("Continue"); break;
         }
     }
 }

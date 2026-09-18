@@ -166,6 +166,11 @@ static void collect_locals(CgCtx *ctx, Stmt *s) {
                 collect_locals(ctx, s->if_stmt.else_body);
                 break;
             case STMT_WHILE: collect_locals(ctx, s->while_stmt.body); break;
+            case STMT_FOR:
+                collect_locals(ctx, s->for_stmt.init);
+                collect_locals(ctx, s->for_stmt.body);
+                break;
+            case STMT_DO: collect_locals(ctx, s->do_stmt.body); break;
             default: break;
         }
     }
@@ -353,6 +358,10 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
         case EXPR_INT_LIT:
             return CL_FunctionBuilder_iconst(ctx->b, I32, e->int_lit);
 
+        case EXPR_STRING_LIT:
+            fprintf(stderr, "codegen: string literals not yet supported\n");
+            exit(1);
+
         case EXPR_VAR:
         case EXPR_DEREF:
         case EXPR_INDEX:
@@ -361,9 +370,6 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
                 return lower_lvalue(ctx, e);
             }
             if (is_struct(e->type)) {
-                /* Bare struct rvalue — only valid as an lvalue source.
-                 * Return its address; callers that need a value must
-                 * dereference fields. */
                 return lower_lvalue(ctx, e);
             }
             CValue addr = lower_lvalue(ctx, e);
@@ -499,6 +505,111 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
                 CL_FunctionBuilder_switch_to_block(ctx->b, exit_blk);
                 ctx->terminated = 0;
                 break;
+            }
+            case STMT_FOR: {
+                if (s->for_stmt.init)
+                    lower_stmt(ctx, s->for_stmt.init);
+
+                CBlock head_blk = CL_FunctionBuilder_create_block(ctx->b);
+                CBlock post_blk = CL_FunctionBuilder_create_block(ctx->b);
+                CBlock body_blk = CL_FunctionBuilder_create_block(ctx->b);
+                CBlock exit_blk = CL_FunctionBuilder_create_block(ctx->b);
+
+                if (!ctx->terminated)
+                    CL_FunctionBuilder_jump(ctx->b, head_blk, NULL, 0);
+                ctx->terminated = 1;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, head_blk);
+                ctx->terminated = 0;
+                CValue cond;
+                if (s->for_stmt.cond) {
+                    cond = lower_expr(ctx, s->for_stmt.cond);
+                } else {
+                    cond = CL_FunctionBuilder_iconst(ctx->b, I32, 1);
+                }
+                CL_FunctionBuilder_brif(ctx->b, cond,
+                    body_blk, NULL, 0,
+                    exit_blk, NULL, 0);
+                CL_FunctionBuilder_seal_block(ctx->b, body_blk);
+                CL_FunctionBuilder_seal_block(ctx->b, exit_blk);
+                ctx->terminated = 1;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, body_blk);
+                ctx->terminated = 0;
+                CBlock saved_break = ctx->loop_break;
+                CBlock saved_cont  = ctx->loop_continue;
+                ctx->loop_break    = exit_blk;
+                ctx->loop_continue = post_blk;
+                lower_stmt(ctx, s->for_stmt.body);
+                if (!ctx->terminated)
+                    CL_FunctionBuilder_jump(ctx->b, post_blk, NULL, 0);
+                ctx->loop_break    = saved_break;
+                ctx->loop_continue = saved_cont;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, post_blk);
+                ctx->terminated = 0;
+                if (s->for_stmt.post)
+                    (void)lower_expr(ctx, s->for_stmt.post);
+                CL_FunctionBuilder_jump(ctx->b, head_blk, NULL, 0);
+
+                CL_FunctionBuilder_seal_block(ctx->b, head_blk);
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, exit_blk);
+                ctx->terminated = 0;
+                break;
+            }
+            case STMT_DO: {
+                CBlock body_blk = CL_FunctionBuilder_create_block(ctx->b);
+                CBlock head_blk = CL_FunctionBuilder_create_block(ctx->b);
+                CBlock exit_blk = CL_FunctionBuilder_create_block(ctx->b);
+
+                if (!ctx->terminated)
+                    CL_FunctionBuilder_jump(ctx->b, body_blk, NULL, 0);
+                ctx->terminated = 1;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, body_blk);
+                ctx->terminated = 0;
+                CBlock saved_break = ctx->loop_break;
+                CBlock saved_cont  = ctx->loop_continue;
+                ctx->loop_break    = exit_blk;
+                ctx->loop_continue = head_blk;
+                lower_stmt(ctx, s->do_stmt.body);
+                if (!ctx->terminated)
+                    CL_FunctionBuilder_jump(ctx->b, head_blk, NULL, 0);
+                ctx->loop_break    = saved_break;
+                ctx->loop_continue = saved_cont;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, head_blk);
+                ctx->terminated = 0;
+                CValue cond = lower_expr(ctx, s->do_stmt.cond);
+                CL_FunctionBuilder_brif(ctx->b, cond,
+                    body_blk, NULL, 0,
+                    exit_blk, NULL, 0);
+                CL_FunctionBuilder_seal_block(ctx->b, body_blk);
+                CL_FunctionBuilder_seal_block(ctx->b, exit_blk);
+                ctx->terminated = 1;
+
+                CL_FunctionBuilder_switch_to_block(ctx->b, exit_blk);
+                ctx->terminated = 0;
+                break;
+            }
+            case STMT_BREAK: {
+                if (ctx->loop_break == (CBlock)-1) {
+                    fprintf(stderr, "codegen: break outside loop\n");
+                    exit(1);
+                }
+                CL_FunctionBuilder_jump(ctx->b, ctx->loop_break, NULL, 0);
+                ctx->terminated = 1;
+                return;
+            }
+            case STMT_CONTINUE: {
+                if (ctx->loop_continue == (CBlock)-1) {
+                    fprintf(stderr, "codegen: continue outside loop\n");
+                    exit(1);
+                }
+                CL_FunctionBuilder_jump(ctx->b, ctx->loop_continue, NULL, 0);
+                ctx->terminated = 1;
+                return;
             }
             default:
                 fprintf(stderr, "codegen: unsupported stmt kind %d\n", (int)s->kind);

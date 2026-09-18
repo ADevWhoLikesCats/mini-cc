@@ -37,8 +37,6 @@ static int map_binop(enum CXBinaryOperatorKind k, BinOpKind *out) {
     }
 }
 
-/* ─────────────  Expression lowering  ───────────── */
-
 static Expr *lower_expr(CXCursor c);
 
 static Expr *lower_binop(CXCursor c) {
@@ -107,6 +105,15 @@ static Expr *lower_int_literal(CXCursor c) {
     return e;
 }
 
+static Expr *lower_string_literal(CXCursor c) {
+    CXString sp = clang_getCursorSpelling(c);
+    char *s = cxstr_to_cstr(sp);
+    Expr *e = expr_string(s);
+    free(s);
+    e->type = clang_getCursorType(c);
+    return e;
+}
+
 static Expr *lower_decl_ref(CXCursor c) {
     char *name = cxstr_to_cstr(clang_getCursorSpelling(c));
     Expr *e = expr_var(name);
@@ -139,13 +146,8 @@ static Expr *lower_index(CXCursor c) {
         return CXChildVisit_Continue;
     }
     clang_visitChildren(c, vis, NULL);
-    if (idx != 2) {
-        fprintf(stderr, "array subscript without 2 children\n");
-        return NULL;
-    }
-    Expr *arr = lower_expr(kids[0]);
-    Expr *ix  = lower_expr(kids[1]);
-    Expr *e = expr_index(arr, ix);
+    if (idx != 2) return NULL;
+    Expr *e = expr_index(lower_expr(kids[0]), lower_expr(kids[1]));
     e->type = clang_getCursorType(c);
     return e;
 }
@@ -160,14 +162,11 @@ static Expr *lower_member(CXCursor c) {
     clang_visitChildren(c, vis, NULL);
 
     char *field = cxstr_to_cstr(clang_getCursorSpelling(c));
-
-    /* is_arrow: if base's type is a pointer, we're in `p->f` form */
     int is_arrow = 0;
     if (base) {
         CXType bt = clang_getCanonicalType(base->type);
         is_arrow = (bt.kind == CXType_Pointer);
     }
-
     Expr *e = expr_member(base, field, is_arrow);
     free(field);
     e->type = clang_getCursorType(c);
@@ -187,6 +186,7 @@ static Expr *lower_expr(CXCursor c) {
     enum CXCursorKind k = clang_getCursorKind(c);
     switch (k) {
         case CXCursor_IntegerLiteral:    return lower_int_literal(c);
+        case CXCursor_StringLiteral:     return lower_string_literal(c);
         case CXCursor_DeclRefExpr:       return lower_decl_ref(c);
         case CXCursor_BinaryOperator:    return lower_binop(c);
         case CXCursor_UnaryOperator:     return lower_unop(c);
@@ -248,19 +248,10 @@ static Stmt *lower_decl_stmt(CXCursor c) {
     Expr *init = NULL;
 
     enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
-        (void)parent; (void)data;
+        (void)parent;
         enum CXCursorKind k = clang_getCursorKind(ch);
-        /* Skip the TypeRef child — it's the declared type, not the init. */
         if (k == CXCursor_TypeRef) return CXChildVisit_Continue;
-        if (k == CXCursor_IntegerLiteral ||
-            k == CXCursor_DeclRefExpr ||
-            k == CXCursor_BinaryOperator ||
-            k == CXCursor_UnaryOperator ||
-            k == CXCursor_CallExpr ||
-            k == CXCursor_UnexposedExpr ||
-            k == CXCursor_ParenExpr ||
-            k == CXCursor_ArraySubscriptExpr ||
-            k == CXCursor_MemberRefExpr) {
+        if (clang_isExpression(k)) {
             Expr **slot = data;
             *slot = lower_expr(ch);
             return CXChildVisit_Break;
@@ -310,6 +301,59 @@ static Stmt *lower_while(CXCursor c) {
     return stmt_while(cond, body);
 }
 
+static Stmt *lower_do(CXCursor c) {
+    CXCursor kids[2];
+    int idx = 0;
+    enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
+        (void)parent; (void)data;
+        if (idx < 2) kids[idx++] = ch;
+        return CXChildVisit_Continue;
+    }
+    clang_visitChildren(c, vis, NULL);
+
+    Stmt *body = NULL;
+    Expr *cond = NULL;
+    if (idx >= 1) body = lower_stmt(kids[0]);
+    if (idx >= 2) cond = lower_expr(kids[1]);
+    return stmt_do(body, cond);
+}
+
+static Stmt *lower_for(CXCursor c) {
+    /* Children: [init?, cond?, post?, body]  — but which are present varies.
+     * We'll visit children and classify by cursor kind. */
+    Stmt *init = NULL;
+    Expr *cond = NULL, *post = NULL;
+    Stmt *body = NULL;
+
+    enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
+        (void)parent; (void)data;
+        enum CXCursorKind k = clang_getCursorKind(ch);
+        if (k == CXCursor_DeclStmt) {
+            init = lower_stmt(ch);
+        } else if (k == CXCursor_CompoundStmt) {
+            body = lower_stmt(ch);
+        } else if (k == CXCursor_NullStmt) {
+            /* empty init/cond/post — skip */
+        } else if (clang_isExpression(k)) {
+            if (!cond && !body) {
+                /* First expression before any body is the condition. */
+                cond = lower_expr(ch);
+            } else if (!post && body) {
+                /* After body: it's the post. */
+                post = lower_expr(ch);
+            } else if (!cond) {
+                cond = lower_expr(ch);
+            } else {
+                post = lower_expr(ch);
+            }
+        }
+        return CXChildVisit_Continue;
+    }
+    clang_visitChildren(c, vis, NULL);
+
+    return stmt_for(init, cond, post, body);
+}
+
 static Stmt *lower_stmt(CXCursor c) {
     enum CXCursorKind k = clang_getCursorKind(c);
     switch (k) {
@@ -327,9 +371,13 @@ static Stmt *lower_stmt(CXCursor c) {
             clang_visitChildren(c, dv, &list);
             return list.head;
         }
-        case CXCursor_IfStmt:    return lower_if(c);
-        case CXCursor_WhileStmt: return lower_while(c);
-        case CXCursor_NullStmt:  return NULL;
+        case CXCursor_IfStmt:       return lower_if(c);
+        case CXCursor_WhileStmt:    return lower_while(c);
+        case CXCursor_DoStmt:       return lower_do(c);
+        case CXCursor_ForStmt:      return lower_for(c);
+        case CXCursor_BreakStmt:    return stmt_break();
+        case CXCursor_ContinueStmt: return stmt_continue();
+        case CXCursor_NullStmt:     return NULL;
         default: {
             if (clang_isExpression(k)) {
                 ExprCtx ctx = {0};
