@@ -46,6 +46,19 @@ typedef enum CCallConv {
   WasmtimeAppleAarch64,
 } CCallConv;
 
+typedef enum CIntCC {
+  Equal,
+  NotEqual,
+  SignedLessThan,
+  SignedGreaterThanOrEqual,
+  SignedGreaterThan,
+  SignedLessThanOrEqual,
+  UnsignedLessThan,
+  UnsignedGreaterThanOrEqual,
+  UnsignedGreaterThan,
+  UnsignedLessThanOrEqual,
+} CIntCC;
+
 typedef uint32_t CBlock;
 
 typedef uint32_t CVariable;
@@ -340,6 +353,12 @@ CValue CL_FunctionBuilder_iadd_pairwise(FunctionBuilder *builder, CValue left, C
 CValue CL_FunctionBuilder_x86_pmaddubsw(FunctionBuilder *builder, CValue left, CValue right);
 
 CValue CL_FunctionBuilder_iconcat(FunctionBuilder *builder, CValue left, CValue right);
+
+CValue CL_FunctionBuilder_icmp(FunctionBuilder *builder, enum CIntCC cc, CValue left, CValue right);
+
+CValue CL_FunctionBuilder_ineg(FunctionBuilder *builder, CValue one);
+
+CValue CL_FunctionBuilder_iabs(FunctionBuilder *builder, CValue one);
 
 CValue CL_FunctionBuilder_ineg(FunctionBuilder *builder, CValue one);
 
