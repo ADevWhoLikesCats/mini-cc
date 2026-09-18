@@ -4,15 +4,39 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─────────────  Rung 1: identity functions  ─────────────
+/* ─────────────  Rung 2: arithmetic  ─────────────
  *
  * Supported:
  *   - Functions whose body is a single "return <expr>;"
- *   - <expr> is an int literal or a parameter reference
+ *   - <expr> is one of:
+ *       - int literal
+ *       - parameter reference
+ *       - <expr> + <expr>
+ *       - <expr> - <expr>
+ *       - <expr> * <expr>
+ *       - <expr> / <expr>
+ *       - <expr> % <expr>
  *   - All params and return value are I32
  *
  * Anything else prints an error and exits.
  */
+
+static CValue lower_expr(FunctionBuilder *b, Expr *e, Func *f, CBlock entry);
+
+static CValue lower_binop(FunctionBuilder *b, Expr *e, Func *f, CBlock entry) {
+    CValue lhs = lower_expr(b, e->binop.lhs, f, entry);
+    CValue rhs = lower_expr(b, e->binop.rhs, f, entry);
+    switch (e->binop.op) {
+        case OP_ADD: return CL_FunctionBuilder_iadd(b, lhs, rhs);
+        case OP_SUB: return CL_FunctionBuilder_isub(b, lhs, rhs);
+        case OP_MUL: return CL_FunctionBuilder_imul(b, lhs, rhs);
+        case OP_DIV: return CL_FunctionBuilder_sdiv(b, lhs, rhs);
+        case OP_MOD: return CL_FunctionBuilder_srem(b, lhs, rhs);
+        default:
+            fprintf(stderr, "codegen: unsupported binop at rung 2\n");
+            exit(1);
+    }
+}
 
 static CValue lower_expr(FunctionBuilder *b, Expr *e, Func *f, CBlock entry) {
     switch (e->kind) {
@@ -28,8 +52,11 @@ static CValue lower_expr(FunctionBuilder *b, Expr *e, Func *f, CBlock entry) {
                     e->var_name, f->name);
             exit(1);
 
+        case EXPR_BINOP:
+            return lower_binop(b, e, f, entry);
+
         default:
-            fprintf(stderr, "codegen: unsupported expression kind %d at rung 1\n",
+            fprintf(stderr, "codegen: unsupported expression kind %d at rung 2\n",
                     (int)e->kind);
             exit(1);
     }
@@ -58,26 +85,20 @@ static void emit_function(ObjectModule *mod, Func *f) {
     CL_FunctionBuilder_switch_to_block(b, entry);
     CL_FunctionBuilder_seal_block(b, entry);
 
-    /* 5. Body must be a single return for rung 1. */
+    /* 5. Body must be a single return for rung 2. */
     if (!f->body || f->body->kind != STMT_RETURN || f->body->next != NULL) {
-        fprintf(stderr, "codegen: rung 1 only supports a single return in '%s'\n",
+        fprintf(stderr, "codegen: rung 2 only supports a single return in '%s'\n",
                 f->name);
         exit(1);
     }
 
     CValue rv = lower_expr(b, f->body->ret_expr, f, entry);
-    fprintf(stderr, "[debug] function '%s': return value id = %u\n", f->name, rv);
     CValue retvals[1] = { rv };
     CL_FunctionBuilder_return_(b, retvals, 1);
 
     /* 6. Finalize — consumes the builder. */
     CL_FunctionBuilder_finalize(b);
     CL_FunctionBuilderContext_dispose(fbctx);
-
-    /* Debug: dump the finalized CLIF. */
-    char *clif = CL_Function_display(fn);
-    fprintf(stderr, "=== CLIF for %s ===\n%s\n", f->name, clif);
-    cstr_free(clif);
 
     /* 7. Define in the module — consumes the Function. */
     CL_ObjectModule_define_function(mod, fid, fn);

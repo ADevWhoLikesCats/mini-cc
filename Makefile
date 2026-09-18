@@ -31,7 +31,20 @@ rung1: bin/mini-cc.exe
 	gcc test/rung1_main.c rung1.o -o bin/rung1.exe
 	./bin/rung1.exe
 
-.PHONY: rung1	
+.PHONY: rung1
+
+rung2: $(BIN) rung2.o rung2_main.o
+	./bin/ld.exe -m i386pep -Bdynamic -o bin/rung2.exe bin/crt2.o bin/crtbegin.o rung2_main.o rung2.o -Lbin/lib -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -ladvapi32 -lshell32 -luser32 -lkernel32 bin/crtend.o
+	./bin/rung2.exe
+
+rung2.o: test/rung2.c $(BIN)
+	$(BIN) --emit-obj $<
+	mv out.o $@
+
+rung2_main.o: test/rung2_main.c
+	$(CC) -std=c11 -c $< -o $@
+
+.PHONY: rung2	
 
 clean:
 	rm -f $(OBJS) $(BIN)
