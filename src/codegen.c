@@ -51,7 +51,7 @@ static int is_array(CXType t) {
 
 static int is_struct(CXType t) {
     CXType ct = canon(t);
-    return ct.kind == CXType_Record || ct.kind == CXType_Elaborated;
+    return ct.kind == CXType_Record;
 }
 
 static CXType pointee(CXType t) { return clang_getPointeeType(t); }
@@ -91,6 +91,32 @@ static CType clift_type(CXType t) {
 static long aligned_size(CXType t) {
     long s = type_size(t);
     return (s + 7) & ~7L;
+}
+
+/* ─────────────  Struct field offset lookup  ───────────── */
+
+typedef struct {
+    const char *field_name;
+    long        offset_bytes;
+} FieldLookup;
+
+static enum CXVisitorResult field_lookup_visitor(CXCursor field_c, CXClientData data) {
+    FieldLookup *fl = data;
+    CXString nm = clang_getCursorSpelling(field_c);
+    if (strcmp(clang_getCString(nm), fl->field_name) == 0) {
+        long bits = clang_Cursor_getOffsetOfField(field_c);
+        clang_disposeString(nm);
+        fl->offset_bytes = bits / 8;
+        return CXVisit_Break;
+    }
+    clang_disposeString(nm);
+    return CXVisit_Continue;
+}
+
+static long field_offset_bytes(CXType record_type, const char *field_name) {
+    FieldLookup fl = { field_name, -1 };
+    clang_Type_visitFields(canon(record_type), field_lookup_visitor, &fl);
+    return fl.offset_bytes;
 }
 
 /* ─────────────  Locals  ───────────── */
@@ -287,7 +313,6 @@ static CValue lower_lvalue(CgCtx *ctx, Expr *e) {
             }
             long stride = type_size(elem_t);
             CValue ix = lower_expr(ctx, e->index.index);
-            /* Widen index to i64 for address arithmetic. */
             ix = CL_FunctionBuilder_sextend(ctx->b, I64, ix);
             CValue stride_c = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
             CValue off = CL_FunctionBuilder_imul(ctx->b, ix, stride_c);
@@ -304,8 +329,14 @@ static CValue lower_lvalue(CgCtx *ctx, Expr *e) {
                 base_addr = lower_lvalue(ctx, base);
                 base_t = base->type;
             }
-            long offset = clang_Type_getOffsetOf(canon(base_t), e->member.field) / 8;
-            if (offset < 0) offset = 0;
+            long offset = field_offset_bytes(base_t, e->member.field);
+            if (offset < 0) {
+                CXString tn = clang_getTypeSpelling(canon(base_t));
+                fprintf(stderr, "codegen: field '%s' not found in '%s'\n",
+                        e->member.field, clang_getCString(tn));
+                clang_disposeString(tn);
+                exit(1);
+            }
             CValue off = CL_FunctionBuilder_iconst(ctx->b, I64, offset);
             return CL_FunctionBuilder_iadd(ctx->b, base_addr, off);
         }
@@ -327,6 +358,12 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
         case EXPR_INDEX:
         case EXPR_MEMBER: {
             if (is_array(e->type)) {
+                return lower_lvalue(ctx, e);
+            }
+            if (is_struct(e->type)) {
+                /* Bare struct rvalue — only valid as an lvalue source.
+                 * Return its address; callers that need a value must
+                 * dereference fields. */
                 return lower_lvalue(ctx, e);
             }
             CValue addr = lower_lvalue(ctx, e);

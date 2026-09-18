@@ -245,9 +245,31 @@ static Stmt *lower_return(CXCursor c) {
 
 static Stmt *lower_decl_stmt(CXCursor c) {
     char *name = cxstr_to_cstr(clang_getCursorSpelling(c));
-    ExprCtx ctx = {0};
-    clang_visitChildren(c, expr_visitor, &ctx);
-    Stmt *s = stmt_decl(name, ctx.result);
+    Expr *init = NULL;
+
+    enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
+        (void)parent; (void)data;
+        enum CXCursorKind k = clang_getCursorKind(ch);
+        /* Skip the TypeRef child — it's the declared type, not the init. */
+        if (k == CXCursor_TypeRef) return CXChildVisit_Continue;
+        if (k == CXCursor_IntegerLiteral ||
+            k == CXCursor_DeclRefExpr ||
+            k == CXCursor_BinaryOperator ||
+            k == CXCursor_UnaryOperator ||
+            k == CXCursor_CallExpr ||
+            k == CXCursor_UnexposedExpr ||
+            k == CXCursor_ParenExpr ||
+            k == CXCursor_ArraySubscriptExpr ||
+            k == CXCursor_MemberRefExpr) {
+            Expr **slot = data;
+            *slot = lower_expr(ch);
+            return CXChildVisit_Break;
+        }
+        return CXChildVisit_Continue;
+    }
+    clang_visitChildren(c, vis, &init);
+
+    Stmt *s = stmt_decl(name, init);
     s->decl.type = clang_getCursorType(c);
     free(name);
     return s;

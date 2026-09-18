@@ -96,7 +96,20 @@ rung9.o: test/rung9.c $(BIN)
 rung9_main.o: test/rung9_main.c
 	$(CC) -std=c11 -c $< -o $@
 
-.PHONY: rung9	
+.PHONY: rung9
+
+rung10: $(BIN) rung10.o rung10_main.o
+	./bin/ld.exe -m i386pep -Bdynamic -o bin/rung10.exe bin/crt2.o bin/crtbegin.o rung10_main.o rung10.o -Lbin/lib -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -ladvapi32 -lshell32 -luser32 -lkernel32 bin/crtend.o
+	./bin/rung10.exe
+
+rung10.o: test/rung10.c $(BIN)
+	$(BIN) --emit-obj $<
+	mv out.o $@
+
+rung10_main.o: test/rung10_main.c
+	$(CC) -std=c11 -c $< -o $@
+
+.PHONY: rung10	
 
 clean:
 	rm -f $(OBJS) $(BIN)
