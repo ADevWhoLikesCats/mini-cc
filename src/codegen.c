@@ -1,17 +1,18 @@
 #include "codegen.h"
 #include "craneliftc.h"
+#include <clang-c/Index.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/*** debug cranelift ir flag ***/
 int codegen_debug_clif = 0;
 
 #define MAX_LOCALS 64
 
 typedef struct {
-    char     *name;
-    CVariable slot;
+    char      *name;
+    CXType     type;
+    CStackSlot slot;    /* memory home */
 } LocalBinding;
 
 typedef struct {
@@ -27,6 +28,7 @@ typedef struct {
 } CgCtx;
 
 static CValue lower_expr(CgCtx *ctx, Expr *e);
+static CValue lower_lvalue(CgCtx *ctx, Expr *e);
 static void   lower_stmt(CgCtx *ctx, Stmt *s);
 
 static char *dup_str(const char *s) {
@@ -36,54 +38,115 @@ static char *dup_str(const char *s) {
     return r;
 }
 
-static CVariable local_lookup(CgCtx *ctx, const char *name) {
-    for (int i = 0; i < ctx->nlocals; i++)
-        if (strcmp(ctx->locals[i].name, name) == 0)
-            return ctx->locals[i].slot;
-    return (CVariable)-1;
+/* ─────────────  Type helpers  ───────────── */
+
+static CXType canon(CXType t) { return clang_getCanonicalType(t); }
+
+static int is_pointer(CXType t) { return canon(t).kind == CXType_Pointer; }
+
+static int is_array(CXType t) {
+    CXType ct = canon(t);
+    return ct.kind == CXType_ConstantArray || ct.kind == CXType_IncompleteArray;
 }
 
-static void local_add(CgCtx *ctx, const char *name, CVariable slot) {
+static int is_struct(CXType t) {
+    CXType ct = canon(t);
+    return ct.kind == CXType_Record || ct.kind == CXType_Elaborated;
+}
+
+static CXType pointee(CXType t) { return clang_getPointeeType(t); }
+
+static CXType array_elem(CXType t) { return clang_getArrayElementType(t); }
+
+static long type_size(CXType t) {
+    CXType ct = canon(t);
+    long s = clang_Type_getSizeOf(ct);
+    if (s < 0) {
+        fprintf(stderr, "codegen: sizeof failed for type kind %d\n", (int)ct.kind);
+        exit(1);
+    }
+    return s;
+}
+
+static CType clift_type(CXType t) {
+    CXType ct = canon(t);
+    switch (ct.kind) {
+        case CXType_Bool:
+        case CXType_Char_S: case CXType_Char_U:
+        case CXType_SChar:  case CXType_UChar:   return I8;
+        case CXType_Short:  case CXType_UShort:  return I16;
+        case CXType_Int:    case CXType_UInt:    return I32;
+        case CXType_Long:   case CXType_ULong:
+        case CXType_LongLong: case CXType_ULongLong:
+        case CXType_Pointer:
+        case CXType_ConstantArray:
+        case CXType_IncompleteArray:             return I64;
+        default:
+            fprintf(stderr, "codegen: unsupported type kind %d (%s)\n",
+                    (int)ct.kind, clang_getCString(clang_getTypeSpelling(ct)));
+            exit(1);
+    }
+}
+
+static long aligned_size(CXType t) {
+    long s = type_size(t);
+    /* round up to 8 for stack slot storage */
+    return (s + 7) & ~7L;
+}
+
+/* ─────────────  Locals  ───────────── */
+
+static LocalBinding *local_lookup(CgCtx *ctx, const char *name) {
+    for (int i = 0; i < ctx->nlocals; i++)
+        if (strcmp(ctx->locals[i].name, name) == 0)
+            return &ctx->locals[i];
+    return NULL;
+}
+
+static void local_add(CgCtx *ctx, const char *name, CXType type, CStackSlot slot) {
     if (ctx->nlocals >= MAX_LOCALS) {
         fprintf(stderr, "codegen: too many locals\n");
         exit(1);
     }
     ctx->locals[ctx->nlocals].name = dup_str(name);
+    ctx->locals[ctx->nlocals].type = type;
     ctx->locals[ctx->nlocals].slot = slot;
     ctx->nlocals++;
 }
 
+static CStackSlot alloc_slot(CgCtx *ctx, CXType type) {
+    long sz = aligned_size(type);
+    if (sz < 8) sz = 8;
+    return CL_FunctionBuilder_create_sized_stack_slot(ctx->b, (uint32_t)sz);
+}
+
 static void collect_locals(CgCtx *ctx, Stmt *s) {
     for (int i = 0; i < ctx->f->num_params; i++) {
-        CVariable slot = CL_Variable_from_u32((uint32_t)ctx->nlocals);
-        CL_FunctionBuilder_declare_var(ctx->b, slot, I32);
-        local_add(ctx, ctx->f->params[i].name, slot);
+        CXType pt = ctx->f->params[i].type;
+        CStackSlot slot = alloc_slot(ctx, pt);
+        local_add(ctx, ctx->f->params[i].name, pt, slot);
     }
 
     for (; s; s = s->next) {
         switch (s->kind) {
             case STMT_DECL: {
-                if ((int32_t)local_lookup(ctx, s->decl.name) != -1) break;
-                CVariable slot = CL_Variable_from_u32((uint32_t)ctx->nlocals);
-                CL_FunctionBuilder_declare_var(ctx->b, slot, I32);
-                local_add(ctx, s->decl.name, slot);
+                if (local_lookup(ctx, s->decl.name)) break;
+                CStackSlot slot = alloc_slot(ctx, s->decl.type);
+                local_add(ctx, s->decl.name, s->decl.type, slot);
                 break;
             }
-            case STMT_BLOCK:
-                collect_locals(ctx, s->block);
-                break;
+            case STMT_BLOCK: collect_locals(ctx, s->block); break;
             case STMT_IF:
                 collect_locals(ctx, s->if_stmt.then_body);
                 collect_locals(ctx, s->if_stmt.else_body);
                 break;
-            case STMT_WHILE:
-                collect_locals(ctx, s->while_stmt.body);
-                break;
-            default:
-                break;
+            case STMT_WHILE: collect_locals(ctx, s->while_stmt.body); break;
+            default: break;
         }
     }
 }
+
+/* ─────────────  Binops  ───────────── */
 
 static int cmp_cc_for(BinOpKind op) {
     switch (op) {
@@ -98,24 +161,15 @@ static int cmp_cc_for(BinOpKind op) {
 }
 
 static CValue lower_assign(CgCtx *ctx, Expr *e) {
-    if (e->binop.lhs->kind != EXPR_VAR) {
-        fprintf(stderr, "codegen: assignment to non-variable lvalue\n");
-        exit(1);
-    }
-    const char *name = e->binop.lhs->var_name;
-    CVariable slot = local_lookup(ctx, name);
-    if ((int32_t)slot == -1) {
-        fprintf(stderr, "codegen: assignment to undeclared variable '%s'\n", name);
-        exit(1);
-    }
-    CValue rhs = lower_expr(ctx, e->binop.rhs);
-    CL_FunctionBuilder_def_var(ctx->b, slot, rhs);
+    if (e->binop.op != OP_ASSIGN) return (CValue)-1;
+    CValue addr = lower_lvalue(ctx, e->binop.lhs);
+    CValue rhs  = lower_expr(ctx, e->binop.rhs);
+    CL_FunctionBuilder_store(ctx->b, addr, rhs, 0);
     return rhs;
 }
 
 static CValue lower_binop(CgCtx *ctx, Expr *e) {
-    if (e->binop.op == OP_ASSIGN)
-        return lower_assign(ctx, e);
+    if (e->binop.op == OP_ASSIGN) return lower_assign(ctx, e);
 
     CValue lhs = lower_expr(ctx, e->binop.lhs);
     CValue rhs = lower_expr(ctx, e->binop.rhs);
@@ -141,8 +195,7 @@ static CValue lower_binop(CgCtx *ctx, Expr *e) {
 static CValue lower_unop(CgCtx *ctx, Expr *e) {
     CValue v = lower_expr(ctx, e->unop.operand);
     switch (e->unop.op) {
-        case UNOP_NEG:
-            return CL_FunctionBuilder_ineg(ctx->b, v);
+        case UNOP_NEG: return CL_FunctionBuilder_ineg(ctx->b, v);
         case UNOP_NOT: {
             CValue zero = CL_FunctionBuilder_iconst(ctx->b, I32, 0);
             CValue cmp  = CL_FunctionBuilder_icmp(ctx->b, Equal, v, zero);
@@ -158,12 +211,16 @@ static CValue lower_call(CgCtx *ctx, Expr *e) {
     int nargs = e->call.nargs;
     CValue *args = NULL;
     if (nargs > 0) args = calloc(nargs, sizeof(CValue));
-    for (int i = 0; i < nargs; i++)
-        args[i] = lower_expr(ctx, e->call.args[i]);
 
     Signature *sig = CL_Signature_new(WindowsFastcall);
-    for (int i = 0; i < nargs; i++)
-        CL_Signature_params_push(sig, CL_AbiParam_new(I32));
+
+    for (int i = 0; i < nargs; i++) {
+        Expr *arg = e->call.args[i];
+        args[i] = lower_expr(ctx, arg);
+        /* Param type: for now assume I32 unless pointer-like */
+        CType ct = clift_type(arg->type);
+        CL_Signature_params_push(sig, CL_AbiParam_new(ct));
+    }
     CL_Signature_returns_push(sig, CL_AbiParam_new(I32));
 
     uint32_t fid = CL_ObjectModule_declare_function(ctx->module, e->call.name, sig);
@@ -180,18 +237,71 @@ static CValue lower_call(CgCtx *ctx, Expr *e) {
     return result;
 }
 
+/* ─────────────  Lvalues and addresses  ───────────── */
+
+static CValue lower_lvalue(CgCtx *ctx, Expr *e) {
+    switch (e->kind) {
+        case EXPR_VAR: {
+            LocalBinding *lb = local_lookup(ctx, e->var_name);
+            if (!lb) {
+                fprintf(stderr, "codegen: undefined variable '%s'\n", e->var_name);
+                exit(1);
+            }
+            return CL_FunctionBuilder_stack_addr(ctx->b, I64, lb->slot, 0);
+        }
+        case EXPR_DEREF: {
+            return lower_expr(ctx, e->operand);
+        }
+        case EXPR_INDEX: {
+            CXType arr_t = e->index.array->type;
+            CXType elem_t = array_elem(arr_t);
+            long stride = type_size(elem_t);
+            CValue base = lower_lvalue(ctx, e->index.array);
+            CValue ix   = lower_expr(ctx, e->index.index);
+            CValue stride_c = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
+            CValue off  = CL_FunctionBuilder_imul(ctx->b, ix, stride_c);
+            return CL_FunctionBuilder_iadd(ctx->b, base, off);
+        }
+        case EXPR_MEMBER: {
+            Expr *base = e->member.base;
+            CValue base_addr;
+            CXType base_t;
+            if (e->member.is_arrow) {
+                base_addr = lower_expr(ctx, base);
+                base_t = pointee(base->type);
+            } else {
+                base_addr = lower_lvalue(ctx, base);
+                base_t = base->type;
+            }
+            long offset = clang_Type_getOffsetOf(canon(base_t), e->member.field) / 8;
+            if (offset < 0) offset = 0;
+            CValue off = CL_FunctionBuilder_iconst(ctx->b, I64, offset);
+            return CL_FunctionBuilder_iadd(ctx->b, base_addr, off);
+        }
+        default:
+            fprintf(stderr, "codegen: expression is not an lvalue (kind %d)\n", (int)e->kind);
+            exit(1);
+    }
+}
+
+/* ─────────────  Expressions  ───────────── */
+
 static CValue lower_expr(CgCtx *ctx, Expr *e) {
     switch (e->kind) {
         case EXPR_INT_LIT:
             return CL_FunctionBuilder_iconst(ctx->b, I32, e->int_lit);
 
-        case EXPR_VAR: {
-            CVariable slot = local_lookup(ctx, e->var_name);
-            if ((int32_t)slot != -1)
-                return CL_FunctionBuilder_use_var(ctx->b, slot);
-            fprintf(stderr, "codegen: undefined variable '%s'\n", e->var_name);
-            exit(1);
+        case EXPR_VAR:
+        case EXPR_DEREF:
+        case EXPR_INDEX:
+        case EXPR_MEMBER: {
+            CValue addr = lower_lvalue(ctx, e);
+            CType ct = clift_type(e->type);
+            return CL_FunctionBuilder_load(ctx->b, ct, addr, 0);
         }
+
+        case EXPR_ADDR_OF:
+            return lower_lvalue(ctx, e->operand);
 
         case EXPR_BINOP: return lower_binop(ctx, e);
         case EXPR_UNOP:  return lower_unop(ctx, e);
@@ -203,16 +313,23 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
     }
 }
 
+/* ─────────────  Statements  ───────────── */
+
 static void lower_stmt(CgCtx *ctx, Stmt *s) {
     for (; s; s = s->next) {
         if (ctx->terminated) return;
 
         switch (s->kind) {
             case STMT_DECL: {
-                CVariable slot = local_lookup(ctx, s->decl.name);
                 if (s->decl.init) {
-                    CValue v = lower_expr(ctx, s->decl.init);
-                    CL_FunctionBuilder_def_var(ctx->b, slot, v);
+                    LocalBinding *lb = local_lookup(ctx, s->decl.name);
+                    if (!lb) {
+                        fprintf(stderr, "codegen: decl without slot for '%s'\n", s->decl.name);
+                        exit(1);
+                    }
+                    CValue rhs = lower_expr(ctx, s->decl.init);
+                    CValue addr = CL_FunctionBuilder_stack_addr(ctx->b, I64, lb->slot, 0);
+                    CL_FunctionBuilder_store(ctx->b, addr, rhs, 0);
                 }
                 break;
             }
@@ -245,7 +362,6 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
                     then_blk, NULL, 0,
                     else_target, NULL, 0);
 
-                /* Now that brif has added preds, seal them. */
                 CL_FunctionBuilder_seal_block(ctx->b, then_blk);
                 if (has_else) CL_FunctionBuilder_seal_block(ctx->b, else_blk);
                 CL_FunctionBuilder_seal_block(ctx->b, merge_blk);
@@ -291,7 +407,6 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
                 CL_FunctionBuilder_brif(ctx->b, cond,
                     body_blk, NULL, 0,
                     exit_blk, NULL, 0);
-
                 CL_FunctionBuilder_seal_block(ctx->b, body_blk);
                 CL_FunctionBuilder_seal_block(ctx->b, exit_blk);
                 ctx->terminated = 1;
@@ -321,11 +436,13 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
     }
 }
 
+/* ─────────────  Function emission  ───────────── */
+
 static void emit_function(ObjectModule *mod, Func *f) {
     Signature *sig = CL_Signature_new(WindowsFastcall);
     for (int i = 0; i < f->num_params; i++)
-        CL_Signature_params_push(sig, CL_AbiParam_new(I32));
-    CL_Signature_returns_push(sig, CL_AbiParam_new(I32));
+        CL_Signature_params_push(sig, CL_AbiParam_new(clift_type(f->params[i].type)));
+    CL_Signature_returns_push(sig, CL_AbiParam_new(clift_type(f->return_type)));
 
     uint32_t fid = CL_ObjectModule_declare_function(mod, f->name, sig);
 
@@ -352,9 +469,10 @@ static void emit_function(ObjectModule *mod, Func *f) {
     collect_locals(&ctx, f->body);
 
     for (int i = 0; i < f->num_params; i++) {
-        CValue param_val = CL_FunctionBuilder_block_params(b, entry, i);
-        CVariable slot = local_lookup(&ctx, f->params[i].name);
-        CL_FunctionBuilder_def_var(b, slot, param_val);
+        LocalBinding *lb = local_lookup(&ctx, f->params[i].name);
+        CValue pv = CL_FunctionBuilder_block_params(b, entry, i);
+        CValue addr = CL_FunctionBuilder_stack_addr(b, I64, lb->slot, 0);
+        CL_FunctionBuilder_store(b, addr, pv, 0);
     }
 
     CL_FunctionBuilder_seal_block(b, entry);
@@ -366,7 +484,6 @@ static void emit_function(ObjectModule *mod, Func *f) {
         CL_FunctionBuilder_return_(b, retvals, 1);
     }
 
-    /* Debug: dump CLIF before defining if debug flag was passed.. */
     if (codegen_debug_clif) {
         char *clif = CL_Function_display(fn);
         fprintf(stderr, "=== CLIF for %s ===\n%s\n", f->name, clif);

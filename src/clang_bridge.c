@@ -61,19 +61,13 @@ static Expr *lower_binop(CXCursor c) {
     Expr *lhs = lower_expr(kids[0]);
     Expr *rhs = lower_expr(kids[1]);
     if (!lhs || !rhs) return NULL;
-    return expr_binop(op, lhs, rhs);
+    Expr *e = expr_binop(op, lhs, rhs);
+    e->type = clang_getCursorType(c);
+    return e;
 }
 
 static Expr *lower_unop(CXCursor c) {
     enum CXUnaryOperatorKind uk = clang_getCursorUnaryOperatorKind(c);
-    UnOpKind op;
-    switch (uk) {
-        case CXUnaryOperator_Minus: op = UNOP_NEG; break;
-        case CXUnaryOperator_LNot:  op = UNOP_NOT; break;
-        default:
-            fprintf(stderr, "unsupported unary operator kind: %d\n", (int)uk);
-            return NULL;
-    }
     Expr *operand = NULL;
     enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
         (void)parent; (void)data;
@@ -82,26 +76,42 @@ static Expr *lower_unop(CXCursor c) {
     }
     clang_visitChildren(c, vis, NULL);
     if (!operand) return NULL;
-    return expr_unop(op, operand);
+
+    Expr *e = NULL;
+    switch (uk) {
+        case CXUnaryOperator_Minus: e = expr_unop(UNOP_NEG, operand); break;
+        case CXUnaryOperator_LNot:  e = expr_unop(UNOP_NOT, operand); break;
+        case CXUnaryOperator_AddrOf: e = expr_addr_of(operand); break;
+        case CXUnaryOperator_Deref:  e = expr_deref(operand);   break;
+        default:
+            fprintf(stderr, "unsupported unary operator kind: %d\n", (int)uk);
+            return NULL;
+    }
+    e->type = clang_getCursorType(c);
+    return e;
 }
 
 static Expr *lower_int_literal(CXCursor c) {
     CXEvalResult ev = clang_Cursor_Evaluate(c);
+    long v;
     if (ev) {
-        long long v = clang_EvalResult_getAsLongLong(ev);
+        v = (long)clang_EvalResult_getAsLongLong(ev);
         clang_EvalResult_dispose(ev);
-        return expr_int((long)v);
+    } else {
+        CXString sp = clang_getCursorSpelling(c);
+        v = strtol(clang_getCString(sp), NULL, 0);
+        clang_disposeString(sp);
     }
-    CXString sp = clang_getCursorSpelling(c);
-    long v = strtol(clang_getCString(sp), NULL, 0);
-    clang_disposeString(sp);
-    return expr_int(v);
+    Expr *e = expr_int(v);
+    e->type = clang_getCursorType(c);
+    return e;
 }
 
 static Expr *lower_decl_ref(CXCursor c) {
     char *name = cxstr_to_cstr(clang_getCursorSpelling(c));
     Expr *e = expr_var(name);
     free(name);
+    e->type = clang_getCursorType(c);
     return e;
 }
 
@@ -116,6 +126,51 @@ static Expr *lower_call(CXCursor c) {
     }
     Expr *e = expr_call(name, args, nargs);
     free(name);
+    e->type = clang_getCursorType(c);
+    return e;
+}
+
+static Expr *lower_index(CXCursor c) {
+    CXCursor kids[2];
+    int idx = 0;
+    enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
+        (void)parent; (void)data;
+        if (idx < 2) kids[idx++] = ch;
+        return CXChildVisit_Continue;
+    }
+    clang_visitChildren(c, vis, NULL);
+    if (idx != 2) {
+        fprintf(stderr, "array subscript without 2 children\n");
+        return NULL;
+    }
+    Expr *arr = lower_expr(kids[0]);
+    Expr *ix  = lower_expr(kids[1]);
+    Expr *e = expr_index(arr, ix);
+    e->type = clang_getCursorType(c);
+    return e;
+}
+
+static Expr *lower_member(CXCursor c) {
+    Expr *base = NULL;
+    enum CXChildVisitResult vis(CXCursor ch, CXCursor parent, CXClientData data) {
+        (void)parent; (void)data;
+        base = lower_expr(ch);
+        return CXChildVisit_Break;
+    }
+    clang_visitChildren(c, vis, NULL);
+
+    char *field = cxstr_to_cstr(clang_getCursorSpelling(c));
+
+    /* is_arrow: if base's type is a pointer, we're in `p->f` form */
+    int is_arrow = 0;
+    if (base) {
+        CXType bt = clang_getCanonicalType(base->type);
+        is_arrow = (bt.kind == CXType_Pointer);
+    }
+
+    Expr *e = expr_member(base, field, is_arrow);
+    free(field);
+    e->type = clang_getCursorType(c);
     return e;
 }
 
@@ -131,11 +186,13 @@ static enum CXChildVisitResult expr_visitor(CXCursor c, CXCursor parent, CXClien
 static Expr *lower_expr(CXCursor c) {
     enum CXCursorKind k = clang_getCursorKind(c);
     switch (k) {
-        case CXCursor_IntegerLiteral: return lower_int_literal(c);
-        case CXCursor_DeclRefExpr:    return lower_decl_ref(c);
-        case CXCursor_BinaryOperator: return lower_binop(c);
-        case CXCursor_UnaryOperator:  return lower_unop(c);
-        case CXCursor_CallExpr:       return lower_call(c);
+        case CXCursor_IntegerLiteral:    return lower_int_literal(c);
+        case CXCursor_DeclRefExpr:       return lower_decl_ref(c);
+        case CXCursor_BinaryOperator:    return lower_binop(c);
+        case CXCursor_UnaryOperator:     return lower_unop(c);
+        case CXCursor_CallExpr:          return lower_call(c);
+        case CXCursor_ArraySubscriptExpr: return lower_index(c);
+        case CXCursor_MemberRefExpr:     return lower_member(c);
         case CXCursor_UnexposedExpr:
         case CXCursor_ParenExpr: {
             ExprCtx ctx = {0};
@@ -191,6 +248,7 @@ static Stmt *lower_decl_stmt(CXCursor c) {
     ExprCtx ctx = {0};
     clang_visitChildren(c, expr_visitor, &ctx);
     Stmt *s = stmt_decl(name, ctx.result);
+    s->decl.type = clang_getCursorType(c);
     free(name);
     return s;
 }
@@ -282,11 +340,14 @@ static enum CXChildVisitResult top_level_visitor(CXCursor c, CXCursor parent, CX
     Func *f = func_new(name);
     free(name);
 
+    f->return_type = clang_getResultType(clang_getCursorType(c));
+
     int nargs = clang_Cursor_getNumArguments(c);
     for (int i = 0; i < nargs; i++) {
         CXCursor a = clang_Cursor_getArgument(c, i);
         char *pname = cxstr_to_cstr(clang_getCursorSpelling(a));
         func_add_param(f, pname);
+        f->params[f->num_params - 1].type = clang_getCursorType(a);
         free(pname);
     }
 

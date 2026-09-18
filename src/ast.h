@@ -1,12 +1,19 @@
 #pragma once
 #include <stddef.h>
+#include <clang-c/Index.h>
+
+/* ─────────────  Expressions  ───────────── */
 
 typedef enum {
     EXPR_INT_LIT,
     EXPR_VAR,
     EXPR_BINOP,
     EXPR_UNOP,
-    EXPR_CALL
+    EXPR_CALL,
+    EXPR_ADDR_OF,
+    EXPR_DEREF,
+    EXPR_INDEX,
+    EXPR_MEMBER
 } ExprKind;
 
 typedef enum {
@@ -24,14 +31,20 @@ typedef enum {
 typedef struct Expr Expr;
 struct Expr {
     ExprKind kind;
+    CXType   type;
     union {
         long int_lit;
         char *var_name;
         struct { BinOpKind op; Expr *lhs, *rhs; } binop;
         struct { UnOpKind op; Expr *operand; } unop;
         struct { char *name; Expr **args; int nargs; } call;
+        Expr *operand;
+        struct { Expr *array; Expr *index; } index;
+        struct { Expr *base; char *field; int is_arrow; } member;
     };
 };
+
+/* ─────────────  Statements  ───────────── */
 
 typedef enum {
     STMT_RETURN,
@@ -49,7 +62,7 @@ struct Stmt {
     union {
         Expr *ret_expr;
         Expr *expr;
-        struct { char *name; Expr *init; } decl;
+        struct { char *name; CXType type; Expr *init; } decl;
         Stmt *block;
         struct { Expr *cond; Stmt *then_body; Stmt *else_body; } if_stmt;
         struct { Expr *cond; Stmt *body; } while_stmt;
@@ -57,21 +70,25 @@ struct Stmt {
 };
 
 typedef struct {
-    char *name;
+    char   *name;
+    CXType  type;
 } Param;
 
 typedef struct Func Func;
 struct Func {
-    char  *name;
-    int    num_params;
-    Param *params;
-    Stmt  *body;
-    Func  *next;
+    char   *name;
+    CXType  return_type;
+    int     num_params;
+    Param  *params;
+    Stmt   *body;
+    Func   *next;
 };
 
 typedef struct {
     Func *funcs;
 } Program;
+
+/* ─────────────  Constructors  ───────────── */
 
 Program *program_new(void);
 void     program_free(Program *p);
@@ -85,6 +102,10 @@ Expr *expr_var(const char *name);
 Expr *expr_binop(BinOpKind op, Expr *l, Expr *r);
 Expr *expr_unop(UnOpKind op, Expr *operand);
 Expr *expr_call(const char *name, Expr **args, int nargs);
+Expr *expr_addr_of(Expr *operand);
+Expr *expr_deref(Expr *operand);
+Expr *expr_index(Expr *array, Expr *index);
+Expr *expr_member(Expr *base, const char *field, int is_arrow);
 void  expr_free(Expr *e);
 
 Stmt *stmt_return(Expr *e);

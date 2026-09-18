@@ -97,6 +97,8 @@ typedef uint32_t CJumpTable;
 
 typedef uint32_t CFuncRef;
 
+typedef uint32_t CStackSlot;
+
 void cstr_free(char *s);
 
 FunctionBuilderContext *CL_FunctionBuilderContext_new(void);
@@ -438,3 +440,19 @@ size_t CL_FunctionBuilder_inst_results(FunctionBuilder *builder,
                                        CInst inst,
                                        CValue *out,
                                        size_t out_capacity);
+
+CStackSlot CL_FunctionBuilder_create_sized_stack_slot(FunctionBuilder *builder, uint32_t size);
+
+CValue CL_FunctionBuilder_stack_addr(FunctionBuilder *builder,
+                                     enum CType ty,
+                                     CStackSlot slot,
+                                     int32_t offset);
+
+CValue CL_FunctionBuilder_load(FunctionBuilder *builder,
+                               enum CType ty,
+                               CValue addr,
+                               int32_t offset);
+
+CInst CL_FunctionBuilder_store(FunctionBuilder *builder, CValue addr, CValue value, int32_t offset);
+
+CValue CL_FunctionBuilder_bitcast(FunctionBuilder *builder, enum CType to_ty, CValue val);

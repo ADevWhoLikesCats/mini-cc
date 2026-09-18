@@ -10,6 +10,8 @@ static char *dup_str(const char *s) {
     return r;
 }
 
+/* ─────────────  Program / Func  ───────────── */
+
 Program *program_new(void) { return calloc(1, sizeof(Program)); }
 
 Func *func_new(const char *name) {
@@ -21,6 +23,7 @@ Func *func_new(const char *name) {
 void func_add_param(Func *f, const char *name) {
     f->params = realloc(f->params, (f->num_params + 1) * sizeof(Param));
     f->params[f->num_params].name = dup_str(name);
+    f->params[f->num_params].type = (CXType){0};
     f->num_params++;
 }
 
@@ -47,6 +50,8 @@ void program_free(Program *p) {
     }
     free(p);
 }
+
+/* ─────────────  Expr  ───────────── */
 
 Expr *expr_int(long v) {
     Expr *e = calloc(1, sizeof(Expr));
@@ -85,6 +90,37 @@ Expr *expr_call(const char *name, Expr **args, int nargs) {
     return e;
 }
 
+Expr *expr_addr_of(Expr *operand) {
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = EXPR_ADDR_OF;
+    e->operand = operand;
+    return e;
+}
+
+Expr *expr_deref(Expr *operand) {
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = EXPR_DEREF;
+    e->operand = operand;
+    return e;
+}
+
+Expr *expr_index(Expr *array, Expr *index) {
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = EXPR_INDEX;
+    e->index.array = array;
+    e->index.index = index;
+    return e;
+}
+
+Expr *expr_member(Expr *base, const char *field, int is_arrow) {
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = EXPR_MEMBER;
+    e->member.base = base;
+    e->member.field = dup_str(field);
+    e->member.is_arrow = is_arrow;
+    return e;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -96,10 +132,24 @@ void expr_free(Expr *e) {
             free(e->call.args);
             free(e->call.name);
             break;
+        case EXPR_ADDR_OF:
+        case EXPR_DEREF:
+            expr_free(e->operand);
+            break;
+        case EXPR_INDEX:
+            expr_free(e->index.array);
+            expr_free(e->index.index);
+            break;
+        case EXPR_MEMBER:
+            expr_free(e->member.base);
+            free(e->member.field);
+            break;
         default: break;
     }
     free(e);
 }
+
+/* ─────────────  Stmt  ───────────── */
 
 Stmt *stmt_return(Expr *e) {
     Stmt *s = calloc(1, sizeof(Stmt));
@@ -114,7 +164,7 @@ Stmt *stmt_expr(Expr *e) {
 Stmt *stmt_decl(const char *name, Expr *init) {
     Stmt *s = calloc(1, sizeof(Stmt));
     s->kind = STMT_DECL;
-    s->decl.name = dup_str(name); s->decl.init = init;
+    s->decl.name = dup_str(name); s->decl.init = init; s->decl.type = (CXType){0};
     return s;
 }
 
@@ -169,6 +219,8 @@ void stmt_free(Stmt *s) {
     }
 }
 
+/* ─────────────  Printer  ───────────── */
+
 static void indent(int n) { for (int i = 0; i < n; i++) fputs("  ", stdout); }
 
 static const char *binop_str(BinOpKind k) {
@@ -202,6 +254,24 @@ void expr_print(const Expr *e, int ind) {
             indent(ind); printf("Call(%s, %d args)\n", e->call.name, e->call.nargs);
             for (int i = 0; i < e->call.nargs; i++)
                 expr_print(e->call.args[i], ind + 1);
+            break;
+        case EXPR_ADDR_OF:
+            indent(ind); puts("AddrOf");
+            expr_print(e->operand, ind + 1);
+            break;
+        case EXPR_DEREF:
+            indent(ind); puts("Deref");
+            expr_print(e->operand, ind + 1);
+            break;
+        case EXPR_INDEX:
+            indent(ind); puts("Index");
+            expr_print(e->index.array, ind + 1);
+            expr_print(e->index.index, ind + 1);
+            break;
+        case EXPR_MEMBER:
+            indent(ind); printf("Member(%s%s)\n",
+                e->member.is_arrow ? "->" : ".", e->member.field);
+            expr_print(e->member.base, ind + 1);
             break;
     }
 }

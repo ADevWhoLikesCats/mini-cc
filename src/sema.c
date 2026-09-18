@@ -15,6 +15,13 @@ static int verify_expr(const Expr *e) {
             for (int i = 0; i < e->call.nargs; i++)
                 if (!verify_expr(e->call.args[i])) return 0;
             return 1;
+        case EXPR_ADDR_OF:
+        case EXPR_DEREF:
+            return verify_expr(e->operand);
+        case EXPR_INDEX:
+            return verify_expr(e->index.array) && verify_expr(e->index.index);
+        case EXPR_MEMBER:
+            return verify_expr(e->member.base) && e->member.field != NULL;
     }
     return 0;
 }
