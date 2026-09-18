@@ -1,0 +1,5 @@
+bin/libclang.dll
+bin/craneliftc.dll
+bin/*.exe
+src/*.o
+*.o
