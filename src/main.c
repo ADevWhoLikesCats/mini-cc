@@ -12,8 +12,9 @@
 static void usage(const char *argv0) {
     fprintf(stderr,
         "usage: %s [options] <source.c>\n"
-        "  --ast        print AST and exit\n"
-        "  --emit-obj   emit object file (stub in rung 0)\n",
+        "  --ast         print AST and exit\n"
+        "  --debug-clif  dump Cranelift IR to stderr during codegen\n"
+        "  --emit-obj    emit object file (default)\n",
         argv0);
 }
 
@@ -23,6 +24,7 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--ast") == 0) print_ast = 1;
+        else if (strcmp(argv[i], "--debug-clif") == 0) codegen_debug_clif = 1;
         else if (strcmp(argv[i], "--emit-obj") == 0) { /* default */ }
         else if (argv[i][0] == '-') { usage(argv[0]); return 1; }
         else src = argv[i];

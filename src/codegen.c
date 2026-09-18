@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*** debug cranelift ir flag ***/
+int codegen_debug_clif = 0;
+
 #define MAX_LOCALS 64
 
 typedef struct {
@@ -363,10 +366,12 @@ static void emit_function(ObjectModule *mod, Func *f) {
         CL_FunctionBuilder_return_(b, retvals, 1);
     }
 
-    /* Debug: dump CLIF before defining. */
-    char *clif = CL_Function_display(fn);
-    fprintf(stderr, "=== CLIF for %s ===\n%s\n", f->name, clif);
-    cstr_free(clif);
+    /* Debug: dump CLIF before defining if debug flag was passed.. */
+    if (codegen_debug_clif) {
+        char *clif = CL_Function_display(fn);
+        fprintf(stderr, "=== CLIF for %s ===\n%s\n", f->name, clif);
+        cstr_free(clif);
+    }
 
     CL_FunctionBuilder_finalize(b);
     CL_FunctionBuilderContext_dispose(fbctx);
