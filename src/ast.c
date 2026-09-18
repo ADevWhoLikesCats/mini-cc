@@ -34,6 +34,26 @@ void program_add_func(Program *p, Func *f) {
     cur->next = f;
 }
 
+DataItem *program_add_string(Program *p, const unsigned char *bytes, size_t len) {
+    DataItem *d = calloc(1, sizeof(DataItem));
+
+    /* Generate a unique symbol name: .Lstr0, .Lstr1, ... */
+    static int counter = 0;
+    char namebuf[32];
+    snprintf(namebuf, sizeof(namebuf), ".Lstr%d", counter++);
+    d->symbol = dup_str(namebuf);
+
+    d->bytes = malloc(len);
+    memcpy(d->bytes, bytes, len);
+    d->len = len;
+
+    if (!p->data) { p->data = d; return d; }
+    DataItem *cur = p->data;
+    while (cur->next) cur = cur->next;
+    cur->next = d;
+    return d;
+}
+
 void program_free(Program *p) {
     if (!p) return;
     Func *f = p->funcs;
@@ -46,6 +66,14 @@ void program_free(Program *p) {
         free(f);
         f = n;
     }
+    DataItem *d = p->data;
+    while (d) {
+        DataItem *n = d->next;
+        free(d->symbol);
+        free(d->bytes);
+        free(d);
+        d = n;
+    }
     free(p);
 }
 
@@ -56,10 +84,10 @@ Expr *expr_int(long v) {
     return e;
 }
 
-Expr *expr_string(const char *s) {
+Expr *expr_string(const char *symbol) {
     Expr *e = calloc(1, sizeof(Expr));
     e->kind = EXPR_STRING_LIT;
-    e->string_lit = dup_str(s);
+    e->string_lit = dup_str(symbol);
     return e;
 }
 
@@ -383,8 +411,17 @@ void program_print(const Program *p) {
         printf("func %s(", f->name);
         for (int i = 0; i < f->num_params; i++)
             printf("%s%s", f->params[i].name, i + 1 < f->num_params ? ", " : "");
-        puts(") {");
-        stmt_print(f->body, 1);
-        puts("}\n");
+        if (f->body) {
+            puts(") {");
+            stmt_print(f->body, 1);
+            puts("}\n");
+        } else {
+            puts(");  /* extern */\n");
+        }
+    }
+    if (p->data) {
+        puts("/* string literals */");
+        for (DataItem *d = p->data; d; d = d->next)
+            printf("  %s: %zu bytes\n", d->symbol, d->len);
     }
 }

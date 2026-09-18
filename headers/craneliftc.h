@@ -99,6 +99,8 @@ typedef uint32_t CFuncRef;
 
 typedef uint32_t CStackSlot;
 
+typedef uint32_t CDataId;
+
 void cstr_free(char *s);
 
 FunctionBuilderContext *CL_FunctionBuilderContext_new(void);
@@ -456,3 +458,14 @@ CValue CL_FunctionBuilder_load(FunctionBuilder *builder,
 CInst CL_FunctionBuilder_store(FunctionBuilder *builder, CValue addr, CValue value, int32_t offset);
 
 CValue CL_FunctionBuilder_bitcast(FunctionBuilder *builder, enum CType to_ty, CValue val);
+
+CDataId CL_ObjectModule_declare_data(ObjectModule *module, const char *name, bool writable);
+
+void CL_ObjectModule_define_data(ObjectModule *module,
+                                 CDataId data_id,
+                                 const uint8_t *bytes,
+                                 size_t len);
+
+CValue CL_ObjectModule_global_value(ObjectModule *module,
+                                    CDataId data_id,
+                                    FunctionBuilder *builder);

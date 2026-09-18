@@ -6,6 +6,13 @@
 
 typedef enum CXCursorKind CXCursorKind;
 
+/* Per-translation-unit context. */
+typedef struct {
+    Program *prog;
+} BridgeCtx;
+
+static BridgeCtx g_ctx;
+
 static char *cxstr_to_cstr(CXString s) {
     const char *c = clang_getCString(s);
     size_t n = strlen(c ? c : "") + 1;
@@ -52,14 +59,8 @@ static Expr *lower_binop(CXCursor c) {
         return CXChildVisit_Continue;
     }
     clang_visitChildren(c, vis, NULL);
-    if (idx != 2) {
-        fprintf(stderr, "binop without exactly 2 children\n");
-        return NULL;
-    }
-    Expr *lhs = lower_expr(kids[0]);
-    Expr *rhs = lower_expr(kids[1]);
-    if (!lhs || !rhs) return NULL;
-    Expr *e = expr_binop(op, lhs, rhs);
+    if (idx != 2) return NULL;
+    Expr *e = expr_binop(op, lower_expr(kids[0]), lower_expr(kids[1]));
     e->type = clang_getCursorType(c);
     return e;
 }
@@ -77,10 +78,10 @@ static Expr *lower_unop(CXCursor c) {
 
     Expr *e = NULL;
     switch (uk) {
-        case CXUnaryOperator_Minus: e = expr_unop(UNOP_NEG, operand); break;
-        case CXUnaryOperator_LNot:  e = expr_unop(UNOP_NOT, operand); break;
+        case CXUnaryOperator_Minus:  e = expr_unop(UNOP_NEG, operand); break;
+        case CXUnaryOperator_LNot:   e = expr_unop(UNOP_NOT, operand); break;
         case CXUnaryOperator_AddrOf: e = expr_addr_of(operand); break;
-        case CXUnaryOperator_Deref:  e = expr_deref(operand);   break;
+        case CXUnaryOperator_Deref:  e = expr_deref(operand); break;
         default:
             fprintf(stderr, "unsupported unary operator kind: %d\n", (int)uk);
             return NULL;
@@ -106,12 +107,46 @@ static Expr *lower_int_literal(CXCursor c) {
 }
 
 static Expr *lower_string_literal(CXCursor c) {
+    CXEvalResult ev = clang_Cursor_Evaluate(c);
+    if (ev) {
+        if (clang_EvalResult_getKind(ev) == CXEval_StrLiteral) {
+            const char *str = clang_EvalResult_getAsStr(ev);
+            if (str) {
+                size_t len = strlen(str) + 1;
+                DataItem *d = program_add_string(g_ctx.prog,
+                                                 (const unsigned char *)str, len);
+                clang_EvalResult_dispose(ev);
+                Expr *e = expr_string(d->symbol);
+                e->type = clang_getCursorType(c);
+                return e;
+            }
+        }
+        clang_EvalResult_dispose(ev);
+    }
+
+    /* Fallback: parse the cursor's spelling. */
     CXString sp = clang_getCursorSpelling(c);
-    char *s = cxstr_to_cstr(sp);
-    Expr *e = expr_string(s);
-    free(s);
-    e->type = clang_getCursorType(c);
-    return e;
+    const char *raw = clang_getCString(sp);
+    if (raw && raw[0] == '"') {
+        size_t rl = strlen(raw);
+        if (rl >= 2 && raw[rl-1] == '"') {
+            size_t inner = rl - 2;
+            unsigned char *buf = malloc(inner + 1);
+            memcpy(buf, raw + 1, inner);
+            buf[inner] = 0;
+            DataItem *d = program_add_string(g_ctx.prog, buf, inner + 1);
+            free(buf);
+            clang_disposeString(sp);
+            Expr *e = expr_string(d->symbol);
+            e->type = clang_getCursorType(c);
+            return e;
+        }
+    }
+
+    fprintf(stderr, "clang_bridge: could not extract string literal (raw='%s')\n",
+            raw ? raw : "(null)");
+    clang_disposeString(sp);
+    return NULL;
 }
 
 static Expr *lower_decl_ref(CXCursor c) {
@@ -319,8 +354,6 @@ static Stmt *lower_do(CXCursor c) {
 }
 
 static Stmt *lower_for(CXCursor c) {
-    /* Children: [init?, cond?, post?, body]  — but which are present varies.
-     * We'll visit children and classify by cursor kind. */
     Stmt *init = NULL;
     Expr *cond = NULL, *post = NULL;
     Stmt *body = NULL;
@@ -333,19 +366,12 @@ static Stmt *lower_for(CXCursor c) {
         } else if (k == CXCursor_CompoundStmt) {
             body = lower_stmt(ch);
         } else if (k == CXCursor_NullStmt) {
-            /* empty init/cond/post — skip */
+            /* skip */
         } else if (clang_isExpression(k)) {
-            if (!cond && !body) {
-                /* First expression before any body is the condition. */
-                cond = lower_expr(ch);
-            } else if (!post && body) {
-                /* After body: it's the post. */
-                post = lower_expr(ch);
-            } else if (!cond) {
-                cond = lower_expr(ch);
-            } else {
-                post = lower_expr(ch);
-            }
+            if (!cond && !body) cond = lower_expr(ch);
+            else if (!post && body) post = lower_expr(ch);
+            else if (!cond) cond = lower_expr(ch);
+            else post = lower_expr(ch);
         }
         return CXChildVisit_Continue;
     }
@@ -394,17 +420,14 @@ static Stmt *lower_stmt(CXCursor c) {
 
 /* ─────────────  Top-level  ───────────── */
 
-typedef struct { Program *prog; } TopCtx;
-
 static enum CXChildVisitResult top_level_visitor(CXCursor c, CXCursor parent, CXClientData data) {
     (void)parent;
-    TopCtx *ctx = data;
+    (void)data;
 
     CXSourceLocation loc = clang_getCursorLocation(c);
     if (!clang_Location_isFromMainFile(loc)) return CXChildVisit_Continue;
 
     if (clang_getCursorKind(c) != CXCursor_FunctionDecl) return CXChildVisit_Continue;
-    if (!clang_isCursorDefinition(c)) return CXChildVisit_Continue;
 
     char *name = cxstr_to_cstr(clang_getCursorSpelling(c));
     Func *f = func_new(name);
@@ -421,18 +444,21 @@ static enum CXChildVisitResult top_level_visitor(CXCursor c, CXCursor parent, CX
         free(pname);
     }
 
-    enum CXChildVisitResult body_vis(CXCursor ch, CXCursor parent2, CXClientData d) {
-        (void)parent2;
-        Func *fn = d;
-        if (clang_getCursorKind(ch) == CXCursor_CompoundStmt) {
-            fn->body = lower_block(ch)->block;
-            return CXChildVisit_Break;
+    /* Only definitions have bodies. Declarations without bodies are extern. */
+    if (clang_isCursorDefinition(c)) {
+        enum CXChildVisitResult body_vis(CXCursor ch, CXCursor parent2, CXClientData d) {
+            (void)parent2;
+            Func *fn = d;
+            if (clang_getCursorKind(ch) == CXCursor_CompoundStmt) {
+                fn->body = lower_block(ch)->block;
+                return CXChildVisit_Break;
+            }
+            return CXChildVisit_Continue;
         }
-        return CXChildVisit_Continue;
+        clang_visitChildren(c, body_vis, f);
     }
-    clang_visitChildren(c, body_vis, f);
 
-    program_add_func(ctx->prog, f);
+    program_add_func(g_ctx.prog, f);
     return CXChildVisit_Continue;
 }
 
@@ -465,9 +491,10 @@ Program *clang_bridge_parse(const char *path) {
     }
 
     Program *prog = program_new();
-    TopCtx ctx = { prog };
+    g_ctx.prog = prog;
+
     CXCursor root = clang_getTranslationUnitCursor(tu);
-    clang_visitChildren(root, top_level_visitor, &ctx);
+    clang_visitChildren(root, top_level_visitor, NULL);
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);

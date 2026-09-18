@@ -1,6 +1,8 @@
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 #include <clang-c/Index.h>
+
 
 /* ─────────────  Expressions  ───────────── */
 
@@ -35,7 +37,7 @@ struct Expr {
     CXType   type;
     union {
         long int_lit;
-        char *string_lit;
+        char *string_lit;   /* symbol name like .Lstr0 */
         char *var_name;
         struct { BinOpKind op; Expr *lhs, *rhs; } binop;
         struct { UnOpKind op; Expr *operand; } unop;
@@ -88,12 +90,24 @@ struct Func {
     CXType  return_type;
     int     num_params;
     Param  *params;
-    Stmt   *body;
+    Stmt   *body;      /* NULL for external declarations */
     Func   *next;
 };
 
+/* ─────────────  Data items (string literals)  ───────────── */
+
+typedef struct DataItem DataItem;
+struct DataItem {
+    char      *symbol;      /* e.g. ".Lstr0" */
+    unsigned char *bytes;
+    size_t     len;
+    uint32_t data_id;
+    DataItem  *next;
+};
+
 typedef struct {
-    Func *funcs;
+    Func     *funcs;
+    DataItem *data;         /* linked list of string literals */
 } Program;
 
 /* ─────────────  Constructors  ───────────── */
@@ -104,9 +118,10 @@ Func    *func_new(const char *name);
 void     func_add_param(Func *f, const char *name);
 void     func_set_body(Func *f, Stmt *body);
 void     program_add_func(Program *p, Func *f);
+DataItem *program_add_string(Program *p, const unsigned char *bytes, size_t len);
 
 Expr *expr_int(long v);
-Expr *expr_string(const char *s);
+Expr *expr_string(const char *symbol);
 Expr *expr_var(const char *name);
 Expr *expr_binop(BinOpKind op, Expr *l, Expr *r);
 Expr *expr_unop(UnOpKind op, Expr *operand);

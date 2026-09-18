@@ -135,7 +135,12 @@ rung12a.o: test/rung12a.c $(BIN)
 rung12a_main.o: test/rung12a_main.c
 	$(CC) -std=c11 -c $< -o $@
 
-.PHONY: rung12a	
+.PHONY: rung12a
+
+hello: $(BIN)
+	$(BIN) test/hello.c -o bin/hello.exe --run
+
+.PHONY: hello	
 
 clean:
 	rm -f $(OBJS) $(BIN)

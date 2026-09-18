@@ -20,6 +20,7 @@ typedef struct {
     CBlock           entry;
     Func            *f;
     ObjectModule    *module;
+    Program         *prog;
     LocalBinding     locals[MAX_LOCALS];
     int              nlocals;
     CBlock           loop_break;
@@ -68,7 +69,6 @@ static long type_size(CXType t) {
     return s;
 }
 
-/* Storage size in bytes. */
 static int store_bytes(CXType t) {
     CXType ct = canon(t);
     switch (ct.kind) {
@@ -87,7 +87,6 @@ static int store_bytes(CXType t) {
     }
 }
 
-/* Cranelift type we actually load/store at. */
 static CType store_clift_type(CXType t) {
     switch (store_bytes(t)) {
         case 1: return I8;
@@ -98,7 +97,6 @@ static CType store_clift_type(CXType t) {
     return I32;
 }
 
-/* Cranelift type we compute at (post-widening for arithmetic). */
 static CType compute_clift_type(CXType t) {
     if (store_bytes(t) == 8) return I64;
     return I32;
@@ -117,9 +115,14 @@ static int is_signed_type(CXType t) {
     }
 }
 
-/* Legacy API used by signatures and function params. */
 static CType clift_type(CXType t) {
     return compute_clift_type(t);
+}
+
+/* ABI type for a function argument: arrays decay to pointers. */
+static CType abi_type_for_arg(CXType t) {
+    if (is_array(t)) return I64;
+    return clift_type(t);
 }
 
 static long aligned_size(CXType t) {
@@ -224,19 +227,11 @@ static int cmp_cc_for(BinOpKind op) {
     }
 }
 
-/* Narrow a compute-width value to the storage width of `t`. */
 static CValue narrow_to_store(CgCtx *ctx, CValue v, CXType t) {
     int sz = store_bytes(t);
     if (sz >= 4) return v;
-
-    CType target = store_clift_type(t);
-
-    if (sz == 2) {
-        /* i32 -> i16 */
-        return CL_FunctionBuilder_ireduce(ctx->b, I16, v);
-    }
+    if (sz == 2) return CL_FunctionBuilder_ireduce(ctx->b, I16, v);
     if (sz == 1) {
-        /* i32 -> i8, via i16 */
         CValue mid = CL_FunctionBuilder_ireduce(ctx->b, I16, v);
         return CL_FunctionBuilder_ireduce(ctx->b, I8, mid);
     }
@@ -325,7 +320,7 @@ static CValue lower_call(CgCtx *ctx, Expr *e) {
     for (int i = 0; i < nargs; i++) {
         Expr *arg = e->call.args[i];
         args[i] = lower_expr(ctx, arg);
-        CType ct = clift_type(arg->type);
+        CType ct = abi_type_for_arg(arg->type);
         CL_Signature_params_push(sig, CL_AbiParam_new(ct));
     }
     CL_Signature_returns_push(sig, CL_AbiParam_new(I32));
@@ -412,9 +407,15 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
         case EXPR_INT_LIT:
             return CL_FunctionBuilder_iconst(ctx->b, I32, e->int_lit);
 
-        case EXPR_STRING_LIT:
-            fprintf(stderr, "codegen: string literals not yet supported\n");
+        case EXPR_STRING_LIT: {
+            for (DataItem *d = ctx->prog->data; d; d = d->next) {
+                if (strcmp(d->symbol, e->string_lit) == 0) {
+                    return CL_ObjectModule_global_value(ctx->module, d->data_id, ctx->b);
+                }
+            }
+            fprintf(stderr, "codegen: unknown string symbol '%s'\n", e->string_lit);
             exit(1);
+        }
 
         case EXPR_VAR:
         case EXPR_DEREF:
@@ -428,7 +429,6 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
             CType st = store_clift_type(e->type);
             CValue loaded = CL_FunctionBuilder_load(ctx->b, st, addr, 0);
 
-            /* Widen small types to compute width (i32) on load. */
             if (sz < 4) {
                 CType ct = compute_clift_type(e->type);
                 if (is_signed_type(e->type))
@@ -681,9 +681,20 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
     }
 }
 
+/* ─────────────  Data emission  ───────────── */
+
+static void emit_data(ObjectModule *mod, Program *p) {
+    for (DataItem *d = p->data; d; d = d->next) {
+        d->data_id = CL_ObjectModule_declare_data(mod, d->symbol, 0);
+        CL_ObjectModule_define_data(mod, d->data_id, d->bytes, d->len);
+    }
+}
+
 /* ─────────────  Function emission  ───────────── */
 
-static void emit_function(ObjectModule *mod, Func *f) {
+static void emit_function(ObjectModule *mod, Func *f, Program *prog) {
+    if (!f->body) return;
+
     Signature *sig = CL_Signature_new(WindowsFastcall);
     for (int i = 0; i < f->num_params; i++)
         CL_Signature_params_push(sig, CL_AbiParam_new(clift_type(f->params[i].type)));
@@ -707,6 +718,7 @@ static void emit_function(ObjectModule *mod, Func *f) {
     ctx.entry = entry;
     ctx.f = f;
     ctx.module = mod;
+    ctx.prog = prog;
     ctx.loop_break = (CBlock)-1;
     ctx.loop_continue = (CBlock)-1;
     ctx.terminated = 0;
@@ -743,7 +755,11 @@ static void emit_function(ObjectModule *mod, Func *f) {
 
 int codegen_emit(Program *p, const char *out_path) {
     ObjectModule *mod = CL_ObjectModule_new("mini_cc");
+
+    emit_data(mod, p);
+
     for (Func *f = p->funcs; f; f = f->next)
-        emit_function(mod, f);
+        emit_function(mod, f, p);
+
     return CL_ObjectModule_finish_and_emit(mod, out_path);
 }
