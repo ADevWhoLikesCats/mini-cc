@@ -12,7 +12,7 @@ int codegen_debug_clif = 0;
 typedef struct {
     char      *name;
     CXType     type;
-    CStackSlot slot;    /* memory home */
+    CStackSlot slot;
 } LocalBinding;
 
 typedef struct {
@@ -90,7 +90,6 @@ static CType clift_type(CXType t) {
 
 static long aligned_size(CXType t) {
     long s = type_size(t);
-    /* round up to 8 for stack slot storage */
     return (s + 7) & ~7L;
 }
 
@@ -161,7 +160,6 @@ static int cmp_cc_for(BinOpKind op) {
 }
 
 static CValue lower_assign(CgCtx *ctx, Expr *e) {
-    if (e->binop.op != OP_ASSIGN) return (CValue)-1;
     CValue addr = lower_lvalue(ctx, e->binop.lhs);
     CValue rhs  = lower_expr(ctx, e->binop.rhs);
     CL_FunctionBuilder_store(ctx->b, addr, rhs, 0);
@@ -181,8 +179,33 @@ static CValue lower_binop(CgCtx *ctx, Expr *e) {
     }
 
     switch (e->binop.op) {
-        case OP_ADD: return CL_FunctionBuilder_iadd(ctx->b, lhs, rhs);
-        case OP_SUB: return CL_FunctionBuilder_isub(ctx->b, lhs, rhs);
+        case OP_ADD: {
+            if (is_pointer(e->binop.lhs->type) && !is_pointer(e->binop.rhs->type)) {
+                long stride = type_size(pointee(e->binop.lhs->type));
+                CValue rhs64 = CL_FunctionBuilder_sextend(ctx->b, I64, rhs);
+                CValue s = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
+                CValue scaled = CL_FunctionBuilder_imul(ctx->b, rhs64, s);
+                return CL_FunctionBuilder_iadd(ctx->b, lhs, scaled);
+            }
+            if (is_pointer(e->binop.rhs->type) && !is_pointer(e->binop.lhs->type)) {
+                long stride = type_size(pointee(e->binop.rhs->type));
+                CValue lhs64 = CL_FunctionBuilder_sextend(ctx->b, I64, lhs);
+                CValue s = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
+                CValue scaled = CL_FunctionBuilder_imul(ctx->b, lhs64, s);
+                return CL_FunctionBuilder_iadd(ctx->b, scaled, rhs);
+            }
+            return CL_FunctionBuilder_iadd(ctx->b, lhs, rhs);
+        }
+        case OP_SUB: {
+            if (is_pointer(e->binop.lhs->type) && !is_pointer(e->binop.rhs->type)) {
+                long stride = type_size(pointee(e->binop.lhs->type));
+                CValue rhs64 = CL_FunctionBuilder_sextend(ctx->b, I64, rhs);
+                CValue s = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
+                CValue scaled = CL_FunctionBuilder_imul(ctx->b, rhs64, s);
+                return CL_FunctionBuilder_isub(ctx->b, lhs, scaled);
+            }
+            return CL_FunctionBuilder_isub(ctx->b, lhs, rhs);
+        }
         case OP_MUL: return CL_FunctionBuilder_imul(ctx->b, lhs, rhs);
         case OP_DIV: return CL_FunctionBuilder_sdiv(ctx->b, lhs, rhs);
         case OP_MOD: return CL_FunctionBuilder_srem(ctx->b, lhs, rhs);
@@ -217,7 +240,6 @@ static CValue lower_call(CgCtx *ctx, Expr *e) {
     for (int i = 0; i < nargs; i++) {
         Expr *arg = e->call.args[i];
         args[i] = lower_expr(ctx, arg);
-        /* Param type: for now assume I32 unless pointer-like */
         CType ct = clift_type(arg->type);
         CL_Signature_params_push(sig, CL_AbiParam_new(ct));
     }
@@ -253,13 +275,22 @@ static CValue lower_lvalue(CgCtx *ctx, Expr *e) {
             return lower_expr(ctx, e->operand);
         }
         case EXPR_INDEX: {
-            CXType arr_t = e->index.array->type;
-            CXType elem_t = array_elem(arr_t);
+            CXType base_t = e->index.array->type;
+            CXType elem_t;
+            CValue base;
+            if (is_pointer(base_t)) {
+                elem_t = pointee(base_t);
+                base = lower_expr(ctx, e->index.array);
+            } else {
+                elem_t = array_elem(base_t);
+                base = lower_lvalue(ctx, e->index.array);
+            }
             long stride = type_size(elem_t);
-            CValue base = lower_lvalue(ctx, e->index.array);
-            CValue ix   = lower_expr(ctx, e->index.index);
+            CValue ix = lower_expr(ctx, e->index.index);
+            /* Widen index to i64 for address arithmetic. */
+            ix = CL_FunctionBuilder_sextend(ctx->b, I64, ix);
             CValue stride_c = CL_FunctionBuilder_iconst(ctx->b, I64, stride);
-            CValue off  = CL_FunctionBuilder_imul(ctx->b, ix, stride_c);
+            CValue off = CL_FunctionBuilder_imul(ctx->b, ix, stride_c);
             return CL_FunctionBuilder_iadd(ctx->b, base, off);
         }
         case EXPR_MEMBER: {
@@ -295,6 +326,9 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
         case EXPR_DEREF:
         case EXPR_INDEX:
         case EXPR_MEMBER: {
+            if (is_array(e->type)) {
+                return lower_lvalue(ctx, e);
+            }
             CValue addr = lower_lvalue(ctx, e);
             CType ct = clift_type(e->type);
             return CL_FunctionBuilder_load(ctx->b, ct, addr, 0);
