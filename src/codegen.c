@@ -68,24 +68,58 @@ static long type_size(CXType t) {
     return s;
 }
 
-static CType clift_type(CXType t) {
+/* Storage size in bytes. */
+static int store_bytes(CXType t) {
     CXType ct = canon(t);
     switch (ct.kind) {
         case CXType_Bool:
         case CXType_Char_S: case CXType_Char_U:
-        case CXType_SChar:  case CXType_UChar:   return I8;
-        case CXType_Short:  case CXType_UShort:  return I16;
-        case CXType_Int:    case CXType_UInt:    return I32;
+        case CXType_SChar:  case CXType_UChar:   return 1;
+        case CXType_Short:  case CXType_UShort:  return 2;
+        case CXType_Int:    case CXType_UInt:    return 4;
         case CXType_Long:   case CXType_ULong:
         case CXType_LongLong: case CXType_ULongLong:
-        case CXType_Pointer:
-        case CXType_ConstantArray:
-        case CXType_IncompleteArray:             return I64;
-        default:
-            fprintf(stderr, "codegen: unsupported type kind %d (%s)\n",
-                    (int)ct.kind, clang_getCString(clang_getTypeSpelling(ct)));
-            exit(1);
+        case CXType_Pointer:                      return 8;
+        default: {
+            long s = type_size(t);
+            return (int)s;
+        }
     }
+}
+
+/* Cranelift type we actually load/store at. */
+static CType store_clift_type(CXType t) {
+    switch (store_bytes(t)) {
+        case 1: return I8;
+        case 2: return I16;
+        case 4: return I32;
+        case 8: return I64;
+    }
+    return I32;
+}
+
+/* Cranelift type we compute at (post-widening for arithmetic). */
+static CType compute_clift_type(CXType t) {
+    if (store_bytes(t) == 8) return I64;
+    return I32;
+}
+
+static int is_signed_type(CXType t) {
+    CXType ct = canon(t);
+    switch (ct.kind) {
+        case CXType_Char_S: case CXType_SChar:
+        case CXType_Short:
+        case CXType_Int:
+        case CXType_Long: case CXType_LongLong:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Legacy API used by signatures and function params. */
+static CType clift_type(CXType t) {
+    return compute_clift_type(t);
 }
 
 static long aligned_size(CXType t) {
@@ -190,9 +224,29 @@ static int cmp_cc_for(BinOpKind op) {
     }
 }
 
+/* Narrow a compute-width value to the storage width of `t`. */
+static CValue narrow_to_store(CgCtx *ctx, CValue v, CXType t) {
+    int sz = store_bytes(t);
+    if (sz >= 4) return v;
+
+    CType target = store_clift_type(t);
+
+    if (sz == 2) {
+        /* i32 -> i16 */
+        return CL_FunctionBuilder_ireduce(ctx->b, I16, v);
+    }
+    if (sz == 1) {
+        /* i32 -> i8, via i16 */
+        CValue mid = CL_FunctionBuilder_ireduce(ctx->b, I16, v);
+        return CL_FunctionBuilder_ireduce(ctx->b, I8, mid);
+    }
+    return v;
+}
+
 static CValue lower_assign(CgCtx *ctx, Expr *e) {
     CValue addr = lower_lvalue(ctx, e->binop.lhs);
     CValue rhs  = lower_expr(ctx, e->binop.rhs);
+    rhs = narrow_to_store(ctx, rhs, e->binop.lhs->type);
     CL_FunctionBuilder_store(ctx->b, addr, rhs, 0);
     return rhs;
 }
@@ -366,15 +420,23 @@ static CValue lower_expr(CgCtx *ctx, Expr *e) {
         case EXPR_DEREF:
         case EXPR_INDEX:
         case EXPR_MEMBER: {
-            if (is_array(e->type)) {
-                return lower_lvalue(ctx, e);
-            }
-            if (is_struct(e->type)) {
-                return lower_lvalue(ctx, e);
-            }
+            if (is_array(e->type)) return lower_lvalue(ctx, e);
+            if (is_struct(e->type)) return lower_lvalue(ctx, e);
+
             CValue addr = lower_lvalue(ctx, e);
-            CType ct = clift_type(e->type);
-            return CL_FunctionBuilder_load(ctx->b, ct, addr, 0);
+            int sz = store_bytes(e->type);
+            CType st = store_clift_type(e->type);
+            CValue loaded = CL_FunctionBuilder_load(ctx->b, st, addr, 0);
+
+            /* Widen small types to compute width (i32) on load. */
+            if (sz < 4) {
+                CType ct = compute_clift_type(e->type);
+                if (is_signed_type(e->type))
+                    loaded = CL_FunctionBuilder_sextend(ctx->b, ct, loaded);
+                else
+                    loaded = CL_FunctionBuilder_uextend(ctx->b, ct, loaded);
+            }
+            return loaded;
         }
 
         case EXPR_ADDR_OF:
@@ -405,6 +467,7 @@ static void lower_stmt(CgCtx *ctx, Stmt *s) {
                         exit(1);
                     }
                     CValue rhs = lower_expr(ctx, s->decl.init);
+                    rhs = narrow_to_store(ctx, rhs, s->decl.type);
                     CValue addr = CL_FunctionBuilder_stack_addr(ctx->b, I64, lb->slot, 0);
                     CL_FunctionBuilder_store(ctx->b, addr, rhs, 0);
                 }
